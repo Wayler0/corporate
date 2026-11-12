@@ -5,14 +5,18 @@
 //
 // Libraries: "MFRC522" by GithubCommunity, EEPROM (built in)
 //
-// RGB LED module -> Uno:  R -> A0   G -> A1   B -> A2   "-" (GND) -> GND
+// RGB LED module: plugged straight into the ANALOG IN header, no wires:
+//   R -> A0   G -> A1   B -> A2   GND -> A3 (A3 is driven LOW to act as ground)
 //   (If colours look inverted, your module is common-anode: set COMMON_ANODE
-//    to true and connect its common pin to 5V instead of GND.)
+//    to true; A3 is then driven HIGH instead.)
 // RC522 (optional) -> Uno:  SDA->10 SCK->13 MOSI->11 MISO->12 RST->9 3.3V GND
 //
 // Serial Monitor: 9600 baud, line ending "Newline". Type "help" for commands.
 //
-// LED meaning:  GREEN = paid   RED = refused   YELLOW = already paid (no charge)
+// LED meaning:  GREEN = paid   RED = refused   YELLOW = already paid this trip
+//
+// Each card pays once per trip. Type "trip" (or change route) to start a new
+// trip. Who has paid is saved, so a power cut does not let anyone pay twice.
 
 #include <SPI.h>
 #include <MFRC522.h>
@@ -24,6 +28,7 @@ const byte RST_PIN = 9;
 const byte LED_R = A0;
 const byte LED_G = A1;
 const byte LED_B = A2;
+const byte LED_COMMON = A3;  // LED module's GND pin sits here
 const bool COMMON_ANODE = false;
 
 // ---------- Routes (example fares in KSh: change to the real ones) ----------
@@ -39,8 +44,7 @@ const Route ROUTES[] = {
 const byte ROUTE_COUNT = sizeof(ROUTES) / sizeof(ROUTES[0]);
 
 // ---------- Passengers ----------
-// UIDs are hex with no spaces. Replace the two "REPLACE" lines with the IDs
-// your white card and blue fob printed in Stage 1.
+// UIDs are hex with no spaces (as printed by Stage 1 or check_rc522).
 struct Passenger {
   const char *uid;
   const char *name;
@@ -49,13 +53,12 @@ struct Passenger {
 const Passenger PASSENGERS[] = {
   {"A1B2C3D4", "Test: Kim",       200},
   {"11223344", "Test: low funds",  30},
-  {"00000001", "White card",      500},  // REPLACE uid with real card ID
-  {"00000002", "Blue fob",        500},  // REPLACE uid with real fob ID
+  {"E5734107", "White card",      500},  // read 2026-11-11
+  {"008DEC53", "Blue fob",        500},  // read 2026-11-11
 };
 const byte PASSENGER_COUNT = sizeof(PASSENGERS) / sizeof(PASSENGERS[0]);
 
 // ---------- Settings ----------
-const unsigned long REPEAT_TAP_MS = 10000;  // same card within 10 s = no charge
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
 
@@ -63,6 +66,7 @@ const unsigned long LED_MS = 1500;
 const int EE_MAGIC = 0;       // 1 byte
 const int EE_COUNT = 1;       // 1 byte: passenger count when saved
 const int EE_ROUTE = 2;       // 1 byte
+const int EE_TRIP_PAID = 3;   // 1 byte: bit i set = passenger i paid this trip
 const int EE_BALANCES = 4;    // uint16_t per passenger
 const byte MAGIC = 0x42;
 
@@ -71,8 +75,8 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 bool readerOk = false;
 uint16_t balances[PASSENGER_COUNT];
 byte currentRoute = 0;
-int lastPassenger = -1;
-unsigned long lastTapAt = 0;
+static_assert(PASSENGER_COUNT <= 8, "trip-paid flags fit in one byte: max 8 passengers");
+byte tripPaid = 0;  // bit i set = passenger i already paid this trip
 
 // ---------- LED ----------
 void setColor(bool r, bool g, bool b) {
@@ -104,6 +108,8 @@ void resetBalances() {
   }
   currentRoute = 0;
   saveRoute();
+  tripPaid = 0;
+  EEPROM.update(EE_TRIP_PAID, tripPaid);
   EEPROM.update(EE_COUNT, PASSENGER_COUNT);
   EEPROM.update(EE_MAGIC, MAGIC);
 }
@@ -118,10 +124,24 @@ void loadState() {
     EEPROM.get(EE_BALANCES + i * sizeof(uint16_t), balances[i]);
   }
   currentRoute = EEPROM.read(EE_ROUTE);
+  tripPaid = EEPROM.read(EE_TRIP_PAID);
   if (currentRoute >= ROUTE_COUNT) currentRoute = 0;
 }
 
 // ---------- Helpers ----------
+bool hasPaidThisTrip(byte i) { return tripPaid & (1 << i); }
+
+void markPaid(byte i) {
+  tripPaid |= (1 << i);
+  EEPROM.update(EE_TRIP_PAID, tripPaid);
+}
+
+void newTrip() {
+  tripPaid = 0;
+  EEPROM.update(EE_TRIP_PAID, tripPaid);
+  Serial.println(F("New trip started: every card can pay once."));
+}
+
 // Keep only hex digits, uppercase: "a1 b2 c3 d4" -> "A1B2C3D4"
 void normalizeUid(const char *in, char *out, byte outSize) {
   byte n = 0;
@@ -163,8 +183,8 @@ void processTap(const char *uid, bool simulated) {
   Serial.print(F("Passenger: "));
   Serial.println(PASSENGERS[p].name);
 
-  if (p == lastPassenger && millis() - lastTapAt < REPEAT_TAP_MS) {
-    Serial.println(F("ALREADY PAID: repeat tap ignored, no charge."));
+  if (hasPaidThisTrip(p)) {
+    Serial.println(F("ALREADY PAID this trip: no charge."));
     flash(true, true, false);
     return;
   }
@@ -180,8 +200,7 @@ void processTap(const char *uid, bool simulated) {
 
   balances[p] -= fare;
   saveBalance(p);
-  lastPassenger = p;
-  lastTapAt = millis();
+  markPaid(p);
 
   Serial.print(F("PAID KSh "));
   Serial.print(fare);
@@ -198,7 +217,8 @@ void printHelp() {
   Serial.println(F("  <card id>            simulate a tap, e.g.  A1 B2 C3 D4"));
   Serial.println(F("  list                 show passengers and balances"));
   Serial.println(F("  route                show routes and the current one"));
-  Serial.println(F("  route <n>            switch route, e.g.  route 2"));
+  Serial.println(F("  route <n>            switch route (starts a new trip), e.g.  route 2"));
+  Serial.println(F("  trip                 start a new trip: every card can pay again"));
   Serial.println(F("  topup <card id> <KSh>  add money, e.g.  topup A1B2C3D4 100"));
   Serial.println(F("  reset                restore all start balances"));
 }
@@ -272,14 +292,15 @@ void handleLine(char *line) {
     } else {
       currentRoute = n - 1;
       saveRoute();
-      lastPassenger = -1;  // new trip: allow everyone to pay again
       printRoute();
+      newTrip();
     }
+  } else if (strcasecmp(line, "trip") == 0) {
+    newTrip();
   } else if (strncasecmp(line, "topup ", 6) == 0) {
     topUp(line + 6);
   } else if (strcasecmp(line, "reset") == 0) {
     resetBalances();
-    lastPassenger = -1;
     Serial.println(F("Balances reset."));
     listPassengers();
   } else {
@@ -299,6 +320,8 @@ void setup() {
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
+  pinMode(LED_COMMON, OUTPUT);
+  digitalWrite(LED_COMMON, COMMON_ANODE ? HIGH : LOW);
   setColor(false, false, false);
 
   SPI.begin();
@@ -319,7 +342,25 @@ void setup() {
   flashQuick();
 }
 
+// Re-check the reader every 2 s so a loose wire that reconnects is picked up
+unsigned long lastReaderCheck = 0;
+void checkReader() {
+  if (millis() - lastReaderCheck < 2000) return;
+  lastReaderCheck = millis();
+  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  bool ok = !(version == 0x00 || version == 0xFF);
+  if (ok && !readerOk) {
+    rfid.PCD_Init();
+    Serial.println(F("RC522 reader: connected"));
+  } else if (!ok && readerOk) {
+    Serial.println(F("RC522 reader: LOST - check the wires"));
+  }
+  readerOk = ok;
+}
+
 void loop() {
+  checkReader();
+
   if (Serial.available()) {
     char line[48];
     byte len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
