@@ -3,6 +3,7 @@
 How to connect everything on the Arduino Uno, step by step. Everything here was
 tested on the real kit (11–14 Nov 2026) unless marked **(not yet tested)**.
 For the tidy boxed version, see **section 8: Final neat build**.
+What has been done and tested so far, day by day: [`PROGRESS.md`](PROGRESS.md).
 
 **Golden rules**
 
