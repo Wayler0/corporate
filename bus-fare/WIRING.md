@@ -4,6 +4,7 @@ How to connect everything on the Arduino Uno, step by step. Everything here was
 tested on the real kit (11–14 Nov 2026) unless marked **(not yet tested)**.
 For the tidy boxed version, see **section 8: Final neat build**.
 What has been done and tested so far, day by day: [`PROGRESS.md`](PROGRESS.md).
+The wireless ESP32 version (the demo): **section 9**.
 
 **Golden rules**
 
@@ -465,3 +466,69 @@ Wires needed: LCD 4 + reader 7 + LED 4 + speaker 2 + rails 4 ≈ **21**.
 1. ON light on, LED self-test red → green → blue, LCD shows the route.
 2. Run the **Full test** in section 6.
 3. Shake the box gently and tap again: if anything drops out, a joint is loose.
+
+---
+
+## 9. ESP32 wireless terminal (the demo version, tested 14 Nov)
+
+Board: **ESP32-WROOM-32 DevKit**, 38 pins, USB-C. Firmware: `terminal_esp32`.
+It is too wide for one breadboard (one free hole per pin), so either use the edge
+holes (columns A and J), take it off and push female jumper ends onto its pins,
+or put two breadboards side by side.
+
+### Connections
+
+| Part | Wire | ESP32 pin |
+|---|---|---|
+| RC522 | SDA / SCK / MOSI / MISO / RST | **G5 / G18 / G23 / G19 / G4** |
+| | 3.3V | **3V3** ⚠️ never V5 |
+| | GND | − rail |
+| LCD backpack | SDA / SCL | **G21 / G22** |
+| | VCC | **V5** |
+| | GND | − rail |
+| RGB LED | R / G / B | **G25 / G26 / G27**, GND → − rail |
+| Piezo | + / − | **G13** / − rail |
+
+```
+ ESP32 3V3 ─► + rail (side 1) ─► RC522 3.3V only
+ ESP32 V5  ─► + rail (side 2) ─► LCD VCC
+ ESP32 GND ─► − rails (join both sides) ─► every GND
+```
+
+### Wi-Fi and server: `secrets.h`
+Copy `terminal_esp32/secrets.example.h` to `secrets.h` and fill in:
+
+| Setting | Example | Notes |
+|---|---|---|
+| `WIFI_SSID` / `WIFI_PASS` | `test` / … | 2.4 GHz only. If the router filters MACs, allow `30:76:F5:91:5A:5C` |
+| `SERVER_URL` | `http://192.168.100.33:8000` | the laptop running the server, same network |
+| `TERMINAL_TOKEN` | `demo-terminal-bus-1` | this vehicle's token from the server (`seed_demo`) |
+
+`secrets.h` is never committed. The server must accept the network address:
+the laptop's IP in `ALLOWED_HOSTS`, started with `runserver 0.0.0.0:8000`.
+
+### Uploading
+Arduino IDE: Tools → Board → **ESP32 Dev Module**, Port `/dev/ttyUSB0`, Upload.
+From the terminal the board options must be spelled out:
+```
+arduino --upload --port /dev/ttyUSB0 --board esp32:esp32:esp32:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=default,DebugLevel=none,PSRAM=disabled,LoopCore=1,EventsCore=1,EraseFlash=none bus-fare/terminal_esp32/terminal_esp32.ino
+```
+Serial Monitor: **115200** baud. Commands: `status`, `list`, `trip`, a card ID to
+simulate a tap, `help`.
+
+### What it does
+| Situation | LCD | Behaviour |
+|---|---|---|
+| Server reachable | route + `*` | taps decided by the server |
+| Server or Wi-Fi gone | "Server offline", no `*` | decides alone from its saved copy |
+| Server back | "Server linked" | reconnects by itself within ~5 s |
+| Asking the server | "Checking..." + 🔵 | answer within 2 s, else offline decision |
+
+### Checks
+`check_esp32_parts` (every part, every 5 s) and `check_esp32_wifi` (joins the
+network, tests the internet; uses its own `secrets.h`).
+
+### Power
+USB-C from a phone charger or power bank works. The LiPo battery on its TP4056
+board needs a **5 V boost board (MT3608)** before it can run the terminal; set it
+to 5.0 V with a multimeter **before** connecting. Never put the battery on 3V3.

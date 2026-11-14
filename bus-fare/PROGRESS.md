@@ -12,20 +12,23 @@ Dashboards and server (logins, companies, vehicles): [`DASHBOARDS.md`](DASHBOARD
 
 | Part | Status |
 |---|---|
+| **Wireless terminal (ESP32 + Wi-Fi)** | ✅ **Tested end to end with PK's server** |
 | Card reader (RC522) | ✅ Working, header soldered |
 | LCD 16×2 with I2C backpack | ✅ Working |
 | RGB LED (green/yellow/red) | ✅ Working |
 | Speaker beeps | ✅ Working (quiet; louder in a box) |
 | Fares, once-per-trip check, balances saved through power cuts | ✅ Tested on hardware |
-| Link to laptop server over USB | ✅ Tested with `tools/fake_server.py` |
+| Link to laptop server over USB (Uno version) | ✅ Tested with `tools/fake_server.py` |
 | Automatic fallback when the server goes away | ✅ Tested |
 | GSM module (SIM800C) | ✅ Answers commands; no SIM, no antenna yet |
-| Real backend server (PK) | ⏳ Not started on hardware |
-| Live dashboard (Kim) | ⏳ Depends on the server |
+| Real backend server (PK) | ✅ Merged; ESP32 taps, polls and status work against it |
+| Live dashboard (Kim) | ✅ Merged (see `DASHBOARDS.md`); not yet tried with live taps |
+| Battery power (LiPo + TP4056) | ⏳ Needs an MT3608 5 V boost board; use a power bank or charger meanwhile |
 | Neat build (box or flat board) | ⏳ Planned, see `WIRING.md` section 8 |
 
-**The terminal firmware for the demo is `terminal_mvp`.** It runs on its own, and
-links to the server automatically when the laptop bridge is running.
+**The demo firmware is now `terminal_esp32`** (wireless). It sends taps to the
+server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
+`terminal_mvp` (Uno + USB) stays as the backup.
 
 ## Team
 
@@ -38,7 +41,8 @@ links to the server automatically when the laptop bridge is running.
 
 ## Decisions
 
-- **Arduino Uno only for the demo.** ESP32 (Wi-Fi) and GSM are roadmap items.
+- ~~Arduino Uno only for the demo.~~ **Changed 14 Nov: the aim is a wireless device**, so the
+  demo runs on the **ESP32 over Wi-Fi**. GSM stays a roadmap item (needs SIM, antenna, power).
 - **Fixed fare per route** (example routes in the code; real fares still to set).
 - **Each card pays once per trip.** A new trip starts with the `trip` command or a
   route change. (Chosen over a time window.)
@@ -112,14 +116,37 @@ links to the server automatically when the laptop bridge is running.
   GSM section.
 - Pushing to GitHub needs a token (passwords are no longer accepted).
 
+### 14 Nov (afternoon): Wireless
+- **Goal clarified: a wireless device.** The USB-to-laptop link was only a demo shortcut.
+- ESP32 identified: **ESP32-WROOM-32 DevKit** (38 pins, USB-C, CP2102 USB chip).
+  ESP32 support installed in the Arduino IDE (the downloads kept breaking off and
+  were resumed by hand).
+- Everything rewired to the ESP32 (pins in `WIRING.md` section 9). `check_esp32_parts`:
+  LCD, reader, card read, LED, piezo all OK. The "speaker" is a **piezo disc**.
+- Router `test` uses a **MAC filter**: allowed the ESP32's MAC `30:76:F5:91:5A:5C`;
+  `check_esp32_wifi` then connected and reached the internet.
+- PK's server (Django) and Kim's dashboards merged into `main`. The terminal
+  endpoints need a **vehicle token** (`Authorization: Terminal demo-terminal-bus-1`).
+- Wrote **`terminal_esp32`**: taps go to `POST /api/tap/`, messages come from
+  `POST /api/terminal/poll/` every 2 s, route and fare from `GET /api/status/`.
+  Wi-Fi login, server address and token live in an untracked `secrets.h`.
+- **Tested with the server on a laptop:** white card PAID 50 → 450, then REPEAT;
+  blue fob PAID 50 → 450. Server stopped → LCD "Server offline", a tap offline
+  correctly said "Already paid". Server restarted → terminal reconnected by itself.
+  Also ran from a charger with no laptop attached.
+- Battery found: a LiPo pouch cell already soldered to a **TP4056** charger board
+  ("03962A" is the board's code). Still needs a 5 V boost board (MT3608).
+
 ---
 
 ## Open items
 
 | Item | Who | Notes |
 |---|---|---|
-| Real server speaking the serial protocol | PK | `tools/fake_server.py` is the working example |
-| Dashboard on the server's live feed | Kim | |
+| Dashboard tried with live taps from the ESP32 | Kim | |
+| Start the server reliably for the demo (not from a dev session) | PK | needs the laptop's IP in `ALLOWED_HOSTS` and `runserver 0.0.0.0:8000` |
+| MT3608 5 V boost board for the battery | Solomon | multimeter needed to set 5.0 V |
+| Protect `main` on GitHub | Solomon | Settings → Branches |
 | Neat build: flat board or box | Solomon | `WIRING.md` section 8; needs ~20 longer jumpers |
 | Reset balances to round numbers before the demo | Solomon | `reset` command |
 | Real route fares | Team | Example fares in `terminal_mvp` |
