@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Route
+from .models import Passenger, Route, Transaction
 from .services import normalize_card_uid
 
 
@@ -45,3 +45,17 @@ class RouteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Route
         fields = ['id', 'name', 'fare']
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='passenger.name', default=None)
+
+    class Meta:
+        model = Transaction
+        fields = ['id', 'kind', 'result', 'card_uid', 'name', 'amount', 'balance_after', 'trip', 'created_at']
+
+
+class PassengerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Passenger
+        fields = ['card_uid', 'name', 'balance']

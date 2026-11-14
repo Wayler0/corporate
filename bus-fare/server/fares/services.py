@@ -1,7 +1,8 @@
 """The fare rules. Views call these; nothing else changes a balance."""
 from dataclasses import dataclass
 
-from django.db import transaction
+from django.core.cache import cache
+from django.db import models, transaction
 from django.utils import timezone
 
 from .models import MAX_BALANCE, Passenger, Route, TerminalMessage, Transaction, Trip
@@ -140,3 +141,33 @@ def change_fare(fare, route=None):
     if route.pk == trip.route_id:
         queue_for_terminal(f'FARE {fare}')
     return route
+
+
+# ---------- For the dashboard (read only) ----------
+TERMINAL_SEEN_KEY = 'terminal_last_poll'
+TERMINAL_ONLINE_SECONDS = 8   # the Uno itself gives up on the link after 8 s without LINK
+
+
+def note_terminal_poll():
+    """The bridge just polled, so the terminal is linked. Kept in the cache:
+    after a server restart the terminal shows offline until the next poll (2 s)."""
+    cache.set(TERMINAL_SEEN_KEY, timezone.now(), None)
+
+
+def terminal_status():
+    last = cache.get(TERMINAL_SEEN_KEY)
+    online = last is not None and (timezone.now() - last).total_seconds() <= TERMINAL_ONLINE_SECONDS
+    return {'online': online, 'last_seen': last}
+
+
+def trip_stats(trip):
+    """Money and tap counts for one trip."""
+    taps = Transaction.objects.filter(trip=trip, kind=Transaction.Kind.TAP)
+    R = Transaction.Result
+    totals = taps.aggregate(
+        collected=models.Sum('amount', filter=models.Q(result=R.PAID), default=0),
+        paid=models.Count('id', filter=models.Q(result=R.PAID)),
+        repeat=models.Count('id', filter=models.Q(result=R.REPEAT)),
+        refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN])),
+    )
+    return totals

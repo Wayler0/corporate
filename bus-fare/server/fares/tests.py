@@ -163,3 +163,61 @@ class Step2Tests(APITestCase):
         self.assertLessEqual(len(line), 47)
         for half in line[4:].split('|'):
             self.assertLessEqual(len(half), 16)
+
+
+class DashboardTests(APITestCase):
+    """The read-only endpoints the dashboard polls."""
+
+    def setUp(self):
+        call_command('seed_demo', verbosity=0)
+        from django.core.cache import cache
+        cache.clear()
+
+    def tap(self, card_uid):
+        self.client.post('/api/tap/', {'card_uid': card_uid}, format='json')
+
+    def test_live_counts_this_trip_only(self):
+        for card in ['E5734107', '008DEC53', 'E5734107', '11223344', '99999999']:
+            self.tap(card)
+        data = self.client.get('/api/live/').json()
+        self.assertEqual(data['trip']['route_name'], 'Campus shuttle')
+        self.assertEqual(data['stats'], {'collected': 100, 'paid': 2, 'repeat': 1, 'refused': 2})
+        self.assertEqual([t['result'] for t in data['taps']], ['UNKNOWN', 'LOW', 'REPEAT', 'PAID', 'PAID'])
+        self.assertEqual(data['taps'][0]['name'], None)
+        self.assertEqual(data['taps'][3]['name'], 'Blue fob')
+
+        self.client.post('/api/trip/', {}, format='json')
+        data = self.client.get('/api/live/').json()
+        self.assertEqual(data['stats'], {'collected': 0, 'paid': 0, 'repeat': 0, 'refused': 0})
+        self.assertEqual(data['taps'], [])
+
+    def test_live_leaves_out_topups(self):
+        self.client.post('/api/topup/', {'card_uid': 'E5734107', 'amount': 100}, format='json')
+        self.assertEqual(self.client.get('/api/live/').json()['taps'], [])
+
+    def test_terminal_is_online_only_after_a_recent_poll(self):
+        from datetime import timedelta
+        from unittest import mock
+
+        from django.utils import timezone
+        self.assertFalse(self.client.get('/api/live/').json()['terminal']['online'])
+        self.client.post('/api/terminal/poll/')
+        self.assertTrue(self.client.get('/api/live/').json()['terminal']['online'])
+        later = timezone.now() + timedelta(seconds=9)
+        with mock.patch('fares.services.timezone.now', return_value=later):
+            self.assertFalse(self.client.get('/api/live/').json()['terminal']['online'])
+
+    def test_passenger_list_and_detail(self):
+        self.tap('E5734107')
+        cards = self.client.get('/api/passengers/').json()
+        self.assertEqual(len(cards), 4)
+        self.assertIn({'card_uid': 'E5734107', 'name': 'White card', 'balance': 450}, cards)
+
+        card = self.client.get('/api/passengers/e5 73 41 07/').json()
+        self.assertTrue(card['paid_this_trip'])
+        self.assertEqual(card['balance'], 450)
+        self.assertEqual(card['transactions'][0]['result'], 'PAID')
+        self.assertFalse(self.client.get('/api/passengers/008DEC53/').json()['paid_this_trip'])
+
+    def test_unknown_passenger_is_404(self):
+        self.assertEqual(self.client.get('/api/passengers/99999999/').status_code, 404)

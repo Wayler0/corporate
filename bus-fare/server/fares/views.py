@@ -2,15 +2,21 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Route
+from django.shortcuts import get_object_or_404
+
+from .models import Passenger, Route, Transaction, Trip
 from .serializers import (
-    FareRequestSerializer, NewTripRequestSerializer, RouteSerializer,
-    TapRequestSerializer, TapResponseSerializer, TopUpRequestSerializer,
+    FareRequestSerializer, NewTripRequestSerializer, PassengerSerializer, RouteSerializer,
+    TapRequestSerializer, TapResponseSerializer, TopUpRequestSerializer, TransactionSerializer,
 )
 from .services import (
     AmountError, NoRouteError, UnknownCardError, change_fare, collect_terminal_lines,
-    get_current_trip, process_tap, start_new_trip, top_up,
+    get_current_trip, normalize_card_uid, note_terminal_poll, process_tap, start_new_trip,
+    terminal_status, top_up, trip_stats,
 )
+
+LIVE_TAPS = 30       # taps shown on the dashboard's live screen
+CARD_HISTORY = 20    # transactions shown on a card's page
 
 
 def trip_summary(trip):
@@ -103,4 +109,50 @@ class TerminalPollView(APIView):
     bridge the server is up, so it may keep sending LINK."""
 
     def post(self, request):
+        note_terminal_poll()
         return Response({'lines': collect_terminal_lines()})
+
+
+# ---------- Dashboard (read only) ----------
+class LiveView(APIView):
+    """GET /api/live/ -> everything the dashboard's Live screen shows, in one call
+    (it polls every 2 s): the running trip, its totals, whether the terminal is
+    linked, and the latest taps of this trip, newest first."""
+
+    def get(self, request):
+        try:
+            trip = get_current_trip()
+        except NoRouteError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        taps = (Transaction.objects.filter(trip=trip, kind=Transaction.Kind.TAP)
+                .select_related('passenger')[:LIVE_TAPS])
+        return Response({
+            'trip': {**trip_summary(trip), 'started_at': trip.started_at},
+            'stats': trip_stats(trip),
+            'terminal': terminal_status(),
+            'taps': TransactionSerializer(taps, many=True).data,
+        })
+
+
+class PassengerListView(APIView):
+    """GET /api/passengers/ -> [{"card_uid": "E5734107", "name": "White card", "balance": 450}, ...]"""
+
+    def get(self, request):
+        return Response(PassengerSerializer(Passenger.objects.order_by('name'), many=True).data)
+
+
+class PassengerDetailView(APIView):
+    """GET /api/passengers/E5734107/ -> the card, whether it has paid on the
+    running trip, and its latest transactions (taps and top-ups), newest first."""
+
+    def get(self, request, card_uid):
+        passenger = get_object_or_404(Passenger, card_uid=normalize_card_uid(card_uid))
+        trip = Trip.objects.filter(ended_at__isnull=True).order_by('-id').first()
+        paid = trip is not None and passenger.transactions.filter(
+            trip=trip, result=Transaction.Result.PAID).exists()
+        history = passenger.transactions.select_related('passenger')[:CARD_HISTORY]
+        return Response({
+            **PassengerSerializer(passenger).data,
+            'paid_this_trip': paid,
+            'transactions': TransactionSerializer(history, many=True).data,
+        })
