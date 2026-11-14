@@ -223,6 +223,11 @@ proper charging board. *(Your battery system has not been identified yet.)*
 For the demo linked to the dashboard, the Uno is powered by the laptop's USB cable
 anyway, because that cable also carries the data.
 
+**No SIM card is needed for the demo.** The terminal talks to the server through
+the laptop's USB cable. The borrowed SIM800L (GSM) and the ESP32 (Wi-Fi) are
+roadmap items for a terminal that works inside a real bus; the SIM800L would also
+need a SIM card and its own ~4V 2A power supply. Neither has been wired or tested.
+
 ---
 
 ## 6. Uploading and testing
@@ -319,7 +324,10 @@ the real one**; the Uno copies it so offline mode continues from the same number
 
 ---
 
-## 8. Final neat build
+## 8. Final neat build (planned, not built yet)
+
+Nothing in this section has been bought or built yet (no box as of 14 Nov).
+The rails and the "flat board" option below need no new parts except jumpers.
 
 ### Power through the breadboard rails
 Instead of one wire per module on the Uno's few GND pins, feed the rails once:
@@ -338,7 +346,14 @@ Colours: **red = 5V, orange = 3.3V, black = GND**, anything else = signals.
 Signal wires (SDA/SCL, SPI pins 9–13, pin 8) still go straight to the Uno as in
 sections 3, 4 and 4c.
 
-### Enclosure
+### Without a box: flat board (free)
+Stick everything onto one stiff piece of cardboard, plywood or a file cover:
+Uno and breadboard at the back, LCD standing up behind the reader (propped or taped
+to a folded card), reader lying flat at the front with "TAP CARD" written beside it,
+LED and speaker next to the LCD. Tape wire bundles down so nothing hangs. It looks
+tidy, can be carried in one piece, and everything stays visible for the judges.
+
+### Enclosure (if a box is bought later)
 Plastic or wood only: the reader works through about 3 mm of it, not through metal.
 
 ```
