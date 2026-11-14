@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
-import { api } from '../api.js'
-import { usePoll } from '../usePoll.js'
-import { clock, money } from '../format.js'
-import { Banner, Loading, ResultBadge, ServerProblem } from '../components/ui.jsx'
+import { api } from '../../api.js'
+import { usePoll } from '../../usePoll.js'
+import { clock, money } from '../../format.js'
+import { Banner, Loading, ResultBadge, ServerProblem } from '../../components/ui.jsx'
+import { useAuth } from '../../auth.jsx'
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -11,6 +12,7 @@ const FILTERS = [
 ]
 
 export default function Live() {
+  const { user } = useAuth()
   const poll = usePoll(api.live, 2000)
   const [filter, setFilter] = useState('all')
   const highlight = useRef({ data: null, ids: null, fresh: new Set() })   // to highlight new taps
@@ -19,7 +21,7 @@ export default function Live() {
   if (!live) {
     return (
       <>
-        <header className="topbar dark"><span className="topbar-title">Fare live</span></header>
+        <header className="topbar dark"><span className="topbar-title">{user.vehicle.registration}</span></header>
         <main className="content"><ServerProblem poll={poll} />{!poll.error && <Loading />}</main>
       </>
     )
@@ -46,7 +48,7 @@ export default function Live() {
       <header className="topbar dark">
         <div className="topbar-text">
           <span className="topbar-title">{trip.route_name} · {money(trip.fare)}</span>
-          <span className="topbar-sub">Trip {trip.trip} · since {clock(trip.started_at)}</span>
+          <span className="topbar-sub">{user.vehicle.registration} · Trip {trip.trip} · since {clock(trip.started_at)}</span>
         </div>
         <span className={`pill ${online ? 'pill-on' : 'pill-off'}`}>
           <span className="dot" />

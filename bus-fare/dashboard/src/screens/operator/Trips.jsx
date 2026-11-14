@@ -1,18 +1,19 @@
 import { useState } from 'react'
-import { api, MAX_BALANCE } from '../api.js'
-import { usePoll } from '../usePoll.js'
-import { clock, money } from '../format.js'
-import { Icon, Loading, ServerProblem } from '../components/ui.jsx'
+import { api } from '../../api.js'
+import { useAuth } from '../../auth.jsx'
+import { usePoll } from '../../usePoll.js'
+import { clock, money } from '../../format.js'
+import { Icon, Loading, ServerProblem } from '../../components/ui.jsx'
 
 async function load() {
   const [live, routes, history] = await Promise.all([api.live(), api.routes(), api.trips()])
   return { live, routes, history }
 }
 
-export default function Trip() {
+export default function Trips() {
+  const { user } = useAuth()
   const poll = usePoll(load, 5000)
   const [picked, setPicked] = useState(null)      // route id chosen in the list
-  const [fareText, setFareText] = useState('')
   const [busy, setBusy] = useState(null)          // which action is running
   const [message, setMessage] = useState(null)
 
@@ -32,7 +33,11 @@ export default function Trip() {
     }
   }
 
-  const header = <header className="topbar"><h1>Trips</h1></header>
+  const header = (
+    <header className="topbar">
+      <div className="row-between"><h1>Trips</h1><span className="muted small">{user.vehicle.registration}</span></div>
+    </header>
+  )
   if (!poll.data) {
     return <>{header}<main className="content"><ServerProblem poll={poll} />{!poll.error && <Loading />}</main></>
   }
@@ -42,8 +47,6 @@ export default function Trip() {
   const { trip, stats } = live
   const chosen = picked ?? trip.route
   const chosenRoute = routes.find((r) => r.id === chosen)
-  const fare = Number(fareText)
-  const fareValid = Number.isInteger(fare) && fare >= 1 && fare <= MAX_BALANCE
 
   const newTrip = (routeId) => {
     const where = routeId ? routes.find((r) => r.id === routeId).name : trip.route_name
@@ -52,12 +55,6 @@ export default function Trip() {
       .then((ok) => ok && setPicked(null))
   }
 
-  const saveFare = (event) => {
-    event.preventDefault()
-    if (!fareValid || busy) return
-    run('fare', () => api.changeFare(fare), (r) => `${r.name} now costs ${money(r.fare)}.`)
-      .then((ok) => ok && setFareText(''))
-  }
 
   return (
     <>
@@ -106,17 +103,7 @@ export default function Trip() {
           )}
         </section>
 
-        <form className="card stack pad" onSubmit={saveFare} aria-labelledby="fare-h">
-          <h2 id="fare-h">Change fare</h2>
-          <label className="field">
-            <span className="field-label">New fare for {trip.route_name} (KSh)</span>
-            <span className="inline">
-              <input type="number" inputMode="numeric" min="1" max={MAX_BALANCE} step="1" placeholder={String(trip.fare)} value={fareText} onChange={(e) => setFareText(e.target.value)} />
-              <button type="submit" className="btn dark" disabled={!fareValid || !!busy}>{busy === 'fare' ? 'Saving…' : 'Save'}</button>
-            </span>
-          </label>
-          <p className="muted small">Applies from the next tap. Cards that already paid this trip are not charged again.</p>
-        </form>
+        <p className="muted small note">Fares are set by the transport office. Ask them if a fare is wrong.</p>
 
         <section className="stack">
           <h2>Earlier trips</h2>
