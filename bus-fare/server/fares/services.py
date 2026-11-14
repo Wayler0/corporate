@@ -1,23 +1,27 @@
 """The fare rules. Views call these; nothing else changes a balance."""
+import re
+import secrets
 from dataclasses import dataclass
 
-from django.core.cache import cache
+from django.contrib.auth import get_user_model
 from django.db import models, transaction
 from django.utils import timezone
 
-from .models import MAX_BALANCE, Passenger, Route, TerminalMessage, Transaction, Trip
+from .models import (
+    MAX_BALANCE, Company, Passenger, Profile, Route, Settlement, TerminalMessage, Transaction, Trip,
+)
 
 
 class NoRouteError(Exception):
     """There is no route in the database, so there is no fare to charge."""
 
 
-class UnknownCardError(Exception):
-    """No passenger has this card."""
-
-
 class AmountError(Exception):
     """The amount is not allowed (zero, negative, or over the balance ceiling)."""
+
+
+class NotAllowedError(Exception):
+    """The request makes sense but this account may not do it."""
 
 
 @dataclass
@@ -32,142 +36,214 @@ def normalize_card_uid(text):
     return ''.join(c for c in str(text).upper() if c in '0123456789ABCDEF')
 
 
-def get_current_trip():
-    """The trip that is running now. Starts one on the first route if none is."""
-    trip = Trip.objects.filter(ended_at__isnull=True).select_related('route').order_by('-id').first()
+def normalize_phone(text):
+    """'0712 345 678', '254712345678', '+254712345678' -> '+254712345678'.
+    Returns '' if it is not a Kenyan mobile number."""
+    digits = re.sub(r'\D', '', str(text))
+    if re.fullmatch(r'0[17]\d{8}', digits):
+        digits = '254' + digits[1:]
+    if re.fullmatch(r'254[17]\d{8}', digits):
+        return '+' + digits
+    return ''
+
+
+# ---------- Trips (one running trip per vehicle) ----------
+def running_trip(vehicle):
+    return (Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True)
+            .select_related('route').order_by('-id').first())
+
+
+def get_current_trip(vehicle):
+    """The trip this vehicle is running now. Starts one on the first route if none is."""
+    trip = running_trip(vehicle)
     if trip:
         return trip
     route = Route.objects.order_by('id').first()
     if route is None:
         raise NoRouteError('Add a route first (python manage.py seed_demo).')
-    return Trip.objects.create(route=route)
+    return Trip.objects.create(vehicle=vehicle, route=route)
 
 
 @transaction.atomic
-def process_tap(card_uid):
-    """Approve or refuse one tap, and record it. Checked in this order:
-    UNKNOWN card -> REPEAT (already paid this trip) -> LOW balance -> PAID."""
+def start_new_trip(vehicle, route=None):
+    """End this vehicle's running trip and start a new one: every card can pay
+    once again. With no route given, the new trip stays on the same route."""
+    current = running_trip(vehicle)
+    if route is None:
+        route = current.route if current else Route.objects.order_by('id').first()
+    if route is None:
+        raise NoRouteError('Add a route first (python manage.py seed_demo).')
+    Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True).update(ended_at=timezone.now())
+    trip = Trip.objects.create(vehicle=vehicle, route=route)
+    queue_for_terminal(vehicle, f'FARE {route.fare}')
+    queue_for_terminal(vehicle, 'trip')
+    return trip
+
+
+@transaction.atomic
+def change_fare(route, fare):
+    """Set a route's fare (platform staff, from the Django admin). Every vehicle
+    running a trip on that route is told."""
+    if fare < 1 or fare > MAX_BALANCE:
+        raise AmountError(f'Fare must be 1 to {MAX_BALANCE}.')
+    route.fare = fare
+    route.save(update_fields=['fare'])
+    for trip in Trip.objects.filter(route=route, ended_at__isnull=True, vehicle__isnull=False):
+        queue_for_terminal(trip.vehicle, f'FARE {fare}')
+    return route
+
+
+# ---------- Taps ----------
+def company_outstanding(company):
+    """What a company-pays company still owes: fares charged minus settlements."""
+    charged = Transaction.objects.filter(
+        company=company, paid_by=Transaction.PaidBy.COMPANY).aggregate(
+        total=models.Sum('amount', default=0))['total']
+    paid = company.settlements.aggregate(total=models.Sum('amount', default=0))['total']
+    return charged - paid
+
+
+@transaction.atomic
+def process_tap(vehicle, card_uid):
+    """Approve or refuse one tap on one vehicle, and record it. Checked in this order:
+    UNKNOWN (or deactivated) card -> REPEAT (already paid this trip) -> LOW -> PAID.
+    LOW means: not enough on the card, or (company pays) over the company's credit limit."""
     card_uid = normalize_card_uid(card_uid)
-    trip = get_current_trip()
+    trip = get_current_trip(vehicle)
     fare = trip.route.fare
 
-    def record(result, passenger=None, amount=0, balance=0):
+    def record(result, passenger=None, amount=0, balance=0, paid_by='', company=None):
         Transaction.objects.create(
-            kind=Transaction.Kind.TAP, result=result, card_uid=card_uid,
-            passenger=passenger, trip=trip, amount=amount, balance_after=balance)
+            kind=Transaction.Kind.TAP, result=result, card_uid=card_uid, passenger=passenger,
+            trip=trip, vehicle=vehicle, amount=amount, balance_after=balance,
+            paid_by=paid_by, company=company)
         return TapDecision(result, fare, balance)
 
     # select_for_update locks the passenger's row so two taps at the same
     # moment cannot both take the fare (PostgreSQL/MySQL; SQLite locks the file).
-    passenger = Passenger.objects.select_for_update().filter(card_uid=card_uid).first()
-    if passenger is None:
-        return record(Transaction.Result.UNKNOWN)
+    passenger = (Passenger.objects.select_for_update().select_related('company')
+                 .filter(card_uid=card_uid).first())
+    if passenger is None or not passenger.active:
+        return record(Transaction.Result.UNKNOWN, passenger)
 
     already_paid = Transaction.objects.filter(
         trip=trip, passenger=passenger, result=Transaction.Result.PAID).exists()
     if already_paid:
         return record(Transaction.Result.REPEAT, passenger, balance=passenger.balance)
 
+    company = passenger.company
+    if company is not None and company.company_pays:
+        # Lock the company too, so two taps cannot both squeeze under the limit
+        company = Company.objects.select_for_update().get(pk=company.pk)
+        if company.credit_limit and company_outstanding(company) + fare > company.credit_limit:
+            return record(Transaction.Result.LOW, passenger, balance=passenger.balance)
+        return record(Transaction.Result.PAID, passenger, amount=fare, balance=passenger.balance,
+                      paid_by=Transaction.PaidBy.COMPANY, company=company)
+
     if passenger.balance < fare:
         return record(Transaction.Result.LOW, passenger, balance=passenger.balance)
 
     passenger.balance -= fare
     passenger.save(update_fields=['balance'])
-    return record(Transaction.Result.PAID, passenger, amount=fare, balance=passenger.balance)
+    return record(Transaction.Result.PAID, passenger, amount=fare, balance=passenger.balance,
+                  paid_by=Transaction.PaidBy.CARD)
 
 
-# ---------- Messages for the terminal ----------
-def queue_for_terminal(line):
-    """Leave a line for the bridge to send to the Uno on its next poll."""
-    TerminalMessage.objects.create(line=line[:47])
+# ---------- Messages for a terminal ----------
+def queue_for_terminal(vehicle, line):
+    """Leave a line for this vehicle's bridge to send to its Uno on the next poll."""
+    TerminalMessage.objects.create(vehicle=vehicle, line=line[:47])
 
 
 @transaction.atomic
-def collect_terminal_lines():
-    """Hand over every waiting line, oldest first, and mark them as sent."""
-    waiting = list(TerminalMessage.objects.select_for_update().filter(delivered_at__isnull=True))
-    TerminalMessage.objects.filter(pk__in=[m.pk for m in waiting]).update(delivered_at=timezone.now())
+def collect_terminal_lines(vehicle):
+    """Hand over this vehicle's waiting lines, oldest first, mark them as sent,
+    and note that its terminal is linked."""
+    now = timezone.now()
+    type(vehicle).objects.filter(pk=vehicle.pk).update(last_seen_at=now)
+    waiting = list(TerminalMessage.objects.select_for_update().filter(vehicle=vehicle, delivered_at__isnull=True))
+    TerminalMessage.objects.filter(pk__in=[m.pk for m in waiting]).update(delivered_at=now)
     return [m.line for m in waiting]
 
 
-# ---------- Top-up ----------
+TERMINAL_ONLINE_SECONDS = 8   # the Uno itself gives up on the link after 8 s without LINK
+
+
+def terminal_status(vehicle):
+    last = vehicle.last_seen_at
+    online = last is not None and (timezone.now() - last).total_seconds() <= TERMINAL_ONLINE_SECONDS
+    return {'online': online, 'last_seen': last}
+
+
+# ---------- Top-up (employee pays billing) ----------
 @transaction.atomic
-def top_up(card_uid, amount):
-    """Add money to a card, record it, and tell the terminal. Returns the passenger."""
-    card_uid = normalize_card_uid(card_uid)
-    passenger = Passenger.objects.select_for_update().filter(card_uid=card_uid).first()
-    if passenger is None:
-        raise UnknownCardError(f'No passenger has card {card_uid}.')
+def top_up(passenger, amount, method):
+    """Add money to an employee's card. DEMO: no payment provider is connected
+    yet, so the payment always succeeds. Real M-Pesa goes here later."""
+    passenger = Passenger.objects.select_for_update().select_related('company').get(pk=passenger.pk)
+    if passenger.company is not None and passenger.company.company_pays:
+        raise NotAllowedError(f'{passenger.company.name} pays your fares, so there is nothing to top up.')
+    if not method:
+        raise NotAllowedError('Choose a payment method first.')
     room = MAX_BALANCE - passenger.balance
     if amount < 1 or amount > room:
         raise AmountError(f'Amount must be 1 to {room} (a balance cannot pass KSh {MAX_BALANCE}).')
     passenger.balance += amount
     passenger.save(update_fields=['balance'])
     Transaction.objects.create(
-        kind=Transaction.Kind.TOPUP, result=Transaction.Result.TOPUP, card_uid=card_uid,
-        passenger=passenger, amount=amount, balance_after=passenger.balance)
-    queue_for_terminal(f'MSG Top-up +{amount}|Bal: KSh {passenger.balance}')
+        kind=Transaction.Kind.TOPUP, result=Transaction.Result.TOPUP, card_uid=passenger.card_uid,
+        passenger=passenger, amount=amount, balance_after=passenger.balance, method=method)
     return passenger
 
 
-# ---------- Trips and fares ----------
-@transaction.atomic
-def start_new_trip(route=None):
-    """End the running trip and start a new one: every card can pay once again.
-    With no route given, the new trip stays on the same route."""
-    current = Trip.objects.filter(ended_at__isnull=True).select_related('route').order_by('-id').first()
-    if route is None:
-        route = current.route if current else Route.objects.order_by('id').first()
-    if route is None:
-        raise NoRouteError('Add a route first (python manage.py seed_demo).')
-    Trip.objects.filter(ended_at__isnull=True).update(ended_at=timezone.now())
-    trip = Trip.objects.create(route=route)
-    queue_for_terminal(f'FARE {route.fare}')
-    queue_for_terminal('trip')
-    return trip
-
-
-@transaction.atomic
-def change_fare(fare, route=None):
-    """Set a route's fare. With no route given, it is the running trip's route.
-    The terminal is told only when the fare it is charging has changed."""
-    if fare < 1 or fare > MAX_BALANCE:
-        raise AmountError(f'Fare must be 1 to {MAX_BALANCE}.')
-    trip = get_current_trip()
-    if route is None:
-        route = trip.route
-    route.fare = fare
-    route.save(update_fields=['fare'])
-    if route.pk == trip.route_id:
-        queue_for_terminal(f'FARE {fare}')
-    return route
-
-
-# ---------- For the dashboard (read only) ----------
-TERMINAL_SEEN_KEY = 'terminal_last_poll'
-TERMINAL_ONLINE_SECONDS = 8   # the Uno itself gives up on the link after 8 s without LINK
-
-
-def note_terminal_poll():
-    """The bridge just polled, so the terminal is linked. Kept in the cache:
-    after a server restart the terminal shows offline until the next poll (2 s)."""
-    cache.set(TERMINAL_SEEN_KEY, timezone.now(), None)
-
-
-def terminal_status():
-    last = cache.get(TERMINAL_SEEN_KEY)
-    online = last is not None and (timezone.now() - last).total_seconds() <= TERMINAL_ONLINE_SECONDS
-    return {'online': online, 'last_seen': last}
-
-
-def trip_stats(trip):
-    """Money and tap counts for one trip."""
-    taps = Transaction.objects.filter(trip=trip, kind=Transaction.Kind.TAP)
+# ---------- Totals ----------
+def tap_totals(taps):
+    """Money and counts for a set of TAP transactions."""
     R = Transaction.Result
-    totals = taps.aggregate(
+    return taps.aggregate(
         collected=models.Sum('amount', filter=models.Q(result=R.PAID), default=0),
         paid=models.Count('id', filter=models.Q(result=R.PAID)),
         repeat=models.Count('id', filter=models.Q(result=R.REPEAT)),
         refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN])),
     )
-    return totals
+
+
+def trip_stats(trip):
+    return tap_totals(Transaction.objects.filter(trip=trip, kind=Transaction.Kind.TAP))
+
+
+# ---------- Accounts ----------
+def temporary_password():
+    """Easy to read out or SMS: no 0/O or 1/l."""
+    alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'
+    return ''.join(secrets.choice(alphabet) for _ in range(10))
+
+
+@transaction.atomic
+def create_employee(company, *, name, staff_number, phone, department, card_uid,
+                    payment_method='', payment_account=''):
+    """Register an employee with a card and a login (phone number + temporary
+    password, changed at first login). Returns (passenger, temporary_password)."""
+    User = get_user_model()
+    if User.objects.filter(username=phone).exists():
+        raise NotAllowedError('An account with this phone number already exists.')
+    password = temporary_password()
+    user = User.objects.create_user(username=phone, password=password, first_name=name[:150])
+    Profile.objects.create(user=user, role=Profile.Role.EMPLOYEE, company=company, must_change_password=True)
+    passenger = Passenger.objects.create(
+        company=company, user=user, name=name, staff_number=staff_number, phone=phone,
+        department=department, card_uid=card_uid, payment_method=payment_method,
+        payment_account=payment_account)
+    return passenger, password
+
+
+def reset_password(user):
+    password = temporary_password()
+    user.set_password(password)
+    user.save(update_fields=['password'])
+    Profile.objects.filter(user=user).update(must_change_password=True)
+    return password
+
+
+def settlements_total(company):
+    return Settlement.objects.filter(company=company).aggregate(total=models.Sum('amount', default=0))['total']

@@ -3,10 +3,13 @@
 
     Uno  <--USB serial, 9600 baud-->  bridge.py  <--HTTP-->  Django server
 
-Run (server must already be running):
-    python3 bridge.py                                   /dev/ttyACM0, http://127.0.0.1:8000
-    python3 bridge.py --port COM3                       Windows
-    python3 bridge.py --port /dev/ttyACM1 --server http://192.168.1.20:8000
+Run (server must already be running). Each vehicle has its own terminal token
+(Django admin -> Vehicles); it tells the server which bus this Uno is on:
+    python3 bridge.py --token <token>                   /dev/ttyACM0, http://127.0.0.1:8000
+    python3 bridge.py --token <token> --port COM3       Windows
+    python3 bridge.py --token <token> --port /dev/ttyACM1 --server http://192.168.1.20:8000
+The token can also come from the FARE_TERMINAL_TOKEN environment variable.
+Demo data (manage.py seed_demo): demo-terminal-bus-1 and demo-terminal-bus-2.
 
 What it does (protocol: bus-fare/WIRING.md, "Link to the server"):
   * waits for the Uno's READY, then sends it the server's fare
@@ -18,6 +21,7 @@ What it does (protocol: bus-fare/WIRING.md, "Link to the server"):
 Stop with Ctrl+C.
 """
 import argparse
+import os
 import threading
 import time
 
@@ -38,13 +42,17 @@ def reason(error):
         return 'cannot connect'
     if isinstance(error, requests.Timeout):
         return 'server too slow'
+    response = getattr(error, 'response', None)
+    if response is not None and response.status_code in (401, 403):
+        return 'server refused the terminal token (check --token)'
     return str(error)
 
 
 class Bridge:
-    def __init__(self, port, server, log=print):
+    def __init__(self, port, server, token='', log=print):
         self.port = port                      # an open serial port (or anything with readline/write)
         self.server = server.rstrip('/')
+        self.headers = {'Authorization': f'Terminal {token}'} if token else {}
         self.log = log
         self.write_lock = threading.Lock()    # two threads write to the Uno
         self.ready = False                    # True once the Uno has said READY
@@ -59,7 +67,8 @@ class Bridge:
 
     # ---------- talking to the server ----------
     def api(self, method, path, body=None):
-        response = requests.request(method, self.server + path, json=body, timeout=HTTP_TIMEOUT)
+        response = requests.request(method, self.server + path, json=body, headers=self.headers,
+                                    timeout=HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
@@ -149,7 +158,11 @@ def main():
     parser = argparse.ArgumentParser(description='Link the Uno fare terminal to the server.')
     parser.add_argument('--port', default='/dev/ttyACM0', help='serial port of the Uno (Windows: COM3)')
     parser.add_argument('--server', default='http://127.0.0.1:8000', help='address of the Django server')
+    parser.add_argument('--token', default=os.environ.get('FARE_TERMINAL_TOKEN', ''),
+                        help="this vehicle's terminal token (Django admin -> Vehicles)")
     args = parser.parse_args()
+    if not args.token:
+        parser.error('give this vehicle\'s terminal token: --token <token> (or set FARE_TERMINAL_TOKEN)')
 
     stop = threading.Event()
     try:
@@ -163,7 +176,7 @@ def main():
             print(f'Opened {args.port}. Opening the port restarts the Uno; waiting for READY...')
             connection_stop = threading.Event()
             try:
-                Bridge(port, args.server).run(connection_stop)
+                Bridge(port, args.server, args.token).run(connection_stop)
             except (serial.SerialException, OSError) as error:
                 print(f'Lost the Uno: {error}. Trying again...')
             finally:
