@@ -88,6 +88,13 @@ class BridgeTests(unittest.TestCase):
         api.assert_not_called()
         self.assertEqual(self.port.written, [])
 
+    def test_every_call_carries_the_vehicles_token(self):
+        bridge_with_token = bridge.Bridge(self.port, 'http://server/', 'secret-1', log=lambda text: None)
+        with mock.patch('bridge.requests.request') as request:
+            request.return_value.json.return_value = {'fare': 50}
+            bridge_with_token.api('GET', '/api/status/')
+        self.assertEqual(request.call_args.kwargs['headers'], {'Authorization': 'Terminal secret-1'})
+
 
 if __name__ == '__main__':
     unittest.main()

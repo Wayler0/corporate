@@ -119,6 +119,14 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
+# The dashboards log in with Django sessions (same address as the API through the
+# Vite proxy). Vehicle bridges use "Authorization: Terminal <token>" instead.
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+}
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 14   # stay logged in for two weeks
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
