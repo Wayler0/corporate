@@ -4,6 +4,7 @@ A contactless fare terminal for Kenyan PSVs (matatus/buses), inspired by German
 tap-to-pay ticketing. Built on an Arduino Uno for a competition demo.
 
 Wiring and testing instructions: [`WIRING.md`](WIRING.md).
+Dashboards and server (logins, companies, vehicles): [`DASHBOARDS.md`](DASHBOARDS.md).
 
 ---
 
