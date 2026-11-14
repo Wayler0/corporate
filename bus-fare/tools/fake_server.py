@@ -5,7 +5,7 @@ It talks to the Uno exactly the way PK's bridge must:
   - sends LINK every 2 s so the terminal knows a server is there
   - answers every "TAP <card>" with "RES <result> <fare> <balance>"
 
-Run:   python3 tools/fake_server.py            (uses /dev/ttyACM0)
+Run:   python3 tools/fake_server.py            (finds the Uno by itself)
        python3 tools/fake_server.py /dev/ttyACM1
 While it runs, type:
        topup E5734107 100     add money (the LCD shows it)
@@ -13,6 +13,7 @@ While it runs, type:
        trip                   new trip: everyone can pay again
        quit                   stop (the terminal goes back to standalone)
 """
+import glob
 import sys
 import threading
 import time
@@ -64,7 +65,14 @@ def reader(port, stop):
 
 def main():
     global FARE
-    name = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
+    if len(sys.argv) > 1:
+        name = sys.argv[1]
+    else:
+        # The Uno's name changes (ttyACM0, ttyACM1, ...) when it is replugged: find it.
+        found = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+        if not found:
+            sys.exit("No Arduino found. Is the USB cable plugged in?")
+        name = found[0]
     port = serial.Serial(name, 9600, timeout=0.5)
     print(f"Opened {name}. Opening the port restarts the Uno; waiting for it...")
     stop = threading.Event()
