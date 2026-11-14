@@ -5,8 +5,8 @@ import { clock, money } from '../format.js'
 import { Icon, Loading, ServerProblem } from '../components/ui.jsx'
 
 async function load() {
-  const [live, routes] = await Promise.all([api.live(), api.routes()])
-  return { live, routes }
+  const [live, routes, history] = await Promise.all([api.live(), api.routes(), api.trips()])
+  return { live, routes, history }
 }
 
 export default function Trip() {
@@ -32,12 +32,13 @@ export default function Trip() {
     }
   }
 
-  const header = <header className="topbar"><h1>Trip</h1></header>
+  const header = <header className="topbar"><h1>Trips</h1></header>
   if (!poll.data) {
     return <>{header}<main className="content"><ServerProblem poll={poll} />{!poll.error && <Loading />}</main></>
   }
 
-  const { live, routes } = poll.data
+  const { live, routes, history } = poll.data
+  const earlier = history.trips.filter((t) => t.ended_at)
   const { trip, stats } = live
   const chosen = picked ?? trip.route
   const chosenRoute = routes.find((r) => r.id === chosen)
@@ -64,6 +65,12 @@ export default function Trip() {
       <main className="content">
         <ServerProblem poll={poll} />
         {message && <p className={`msg msg-${message.tone}`} role="status">{message.text}</p>}
+
+        <section className="stats card" aria-label="Today">
+          <div><span className="label">Today</span><strong>{money(history.today.collected)}</strong></div>
+          <div><span className="label">Passengers</span><strong className="fg-paid">{history.today.paid}</strong></div>
+          <div><span className="label">Trips</span><strong>{history.today.trips}</strong></div>
+        </section>
 
         <section className="card stack pad" aria-labelledby="now-h">
           <div className="row-between top">
@@ -110,6 +117,27 @@ export default function Trip() {
           </label>
           <p className="muted small">Applies from the next tap. Cards that already paid this trip are not charged again.</p>
         </form>
+
+        <section className="stack">
+          <h2>Earlier trips</h2>
+          {earlier.length === 0 ? (
+            <p className="card empty">No finished trips yet.</p>
+          ) : (
+            <ul className="card list">
+              {earlier.map((t) => (
+                <li key={t.trip} className="item">
+                  <div className="grow">
+                    <span className="name">Trip {t.trip} · {t.route_name}</span>
+                    <span className="muted small">
+                      {new Date(t.started_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} {clock(t.started_at)}–{clock(t.ended_at)} · {t.stats.paid} {t.stats.paid === 1 ? 'passenger' : 'passengers'}
+                    </span>
+                  </div>
+                  <span className="amount num">{money(t.stats.collected)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </main>
     </>
   )

@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react'
 import { TabBar } from './components/ui.jsx'
 import Live from './screens/Live.jsx'
-import Cards from './screens/Cards.jsx'
-import CardDetail from './screens/CardDetail.jsx'
 import Trip from './screens/Trip.jsx'
 
-// Tiny hash router: #/  #/cards  #/cards/E5734107  #/trip
+// Tiny hash router: #/ (live)  #/trip
 function useHashPath() {
   const read = () => window.location.hash.replace(/^#/, '') || '/'
   const [path, setPath] = useState(read)
@@ -21,9 +19,6 @@ function useHashPath() {
 }
 
 function Screen({ path }) {
-  const card = path.match(/^\/cards\/([0-9A-Fa-f]+)$/)
-  if (card) return <CardDetail uid={card[1].toUpperCase()} />
-  if (path === '/cards') return <Cards />
   if (path === '/trip') return <Trip />
   return <Live />
 }

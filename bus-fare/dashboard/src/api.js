@@ -53,9 +53,7 @@ export const api = {
   live: () => request('GET', '/live/'),
   status: () => request('GET', '/status/'),
   routes: () => request('GET', '/routes/'),
-  passengers: () => request('GET', '/passengers/'),
-  passenger: (uid) => request('GET', `/passengers/${encodeURIComponent(uid)}/`),
-  topUp: (uid, amount) => request('POST', '/topup/', { card_uid: uid, amount }),
+  trips: () => request('GET', '/trips/'),
   newTrip: (routeId) => request('POST', '/trip/', routeId ? { route: routeId } : {}),
   changeFare: (fare) => request('POST', '/fare/', { fare }),
 }

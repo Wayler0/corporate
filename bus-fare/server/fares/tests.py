@@ -184,7 +184,9 @@ class DashboardTests(APITestCase):
         self.assertEqual(data['stats'], {'collected': 100, 'paid': 2, 'repeat': 1, 'refused': 2})
         self.assertEqual([t['result'] for t in data['taps']], ['UNKNOWN', 'LOW', 'REPEAT', 'PAID', 'PAID'])
         self.assertEqual(data['taps'][0]['name'], None)
-        self.assertEqual(data['taps'][3]['name'], 'Blue fob')
+        self.assertEqual(data['taps'][3], {**data['taps'][3], 'name': 'Blue fob', 'amount': 50})
+        # the crew sees who and how much, never card IDs or balances
+        self.assertEqual(set(data['taps'][3]), {'id', 'result', 'name', 'amount', 'created_at'})
 
         self.client.post('/api/trip/', {}, format='json')
         data = self.client.get('/api/live/').json()
@@ -221,3 +223,16 @@ class DashboardTests(APITestCase):
 
     def test_unknown_passenger_is_404(self):
         self.assertEqual(self.client.get('/api/passengers/99999999/').status_code, 404)
+
+    def test_trip_history_and_today(self):
+        self.tap('E5734107')
+        self.tap('008DEC53')
+        self.client.post('/api/trip/', {}, format='json')
+        self.tap('E5734107')
+        data = self.client.get('/api/trips/').json()
+        self.assertEqual(data['today'], {'collected': 150, 'paid': 3, 'trips': 2})
+        running, earlier = data['trips']
+        self.assertIsNone(running['ended_at'])
+        self.assertEqual(running['stats']['collected'], 50)
+        self.assertIsNotNone(earlier['ended_at'])
+        self.assertEqual(earlier['stats'], {'collected': 100, 'paid': 2, 'repeat': 0, 'refused': 0})

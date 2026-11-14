@@ -11,6 +11,7 @@ urlpatterns = [
     path('status/', views.StatusView.as_view(), name='status'),
     path('terminal/poll/', views.TerminalPollView.as_view(), name='terminal-poll'),
     path('live/', views.LiveView.as_view(), name='live'),
+    path('trips/', views.TripListView.as_view(), name='trips'),
     path('passengers/', views.PassengerListView.as_view(), name='passengers'),
     path('passengers/<str:card_uid>/', views.PassengerDetailView.as_view(), name='passenger'),
 ]

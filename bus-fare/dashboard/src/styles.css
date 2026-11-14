@@ -139,7 +139,7 @@ a { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .item.fresh { animation: none; } }
 
 .badge {
-  min-width: 76px; text-align: center; padding: 6px 0; border-radius: 8px; flex: none;
+  min-width: 96px; text-align: center; padding: 6px 0; border-radius: 8px; flex: none;
   font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
 }
 .badge-paid { color: var(--paid); background: var(--paid-bg); }
@@ -227,7 +227,7 @@ a { color: var(--accent); }
 /* ---------- tab bar ---------- */
 .tabbar {
   position: sticky; bottom: 0; z-index: 2;
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   background: var(--surface); border-top: 1px solid var(--line);
   padding: 6px 8px max(10px, env(safe-area-inset-bottom));
 }

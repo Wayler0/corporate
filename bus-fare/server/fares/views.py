@@ -3,10 +3,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from .models import Passenger, Route, Transaction, Trip
 from .serializers import (
-    FareRequestSerializer, NewTripRequestSerializer, PassengerSerializer, RouteSerializer,
+    FareRequestSerializer, NewTripRequestSerializer, OperatorTapSerializer, PassengerSerializer, RouteSerializer,
     TapRequestSerializer, TapResponseSerializer, TopUpRequestSerializer, TransactionSerializer,
 )
 from .services import (
@@ -16,6 +17,7 @@ from .services import (
 )
 
 LIVE_TAPS = 30       # taps shown on the dashboard's live screen
+TRIP_HISTORY = 10    # trips shown on the operator's trips screen
 CARD_HISTORY = 20    # transactions shown on a card's page
 
 
@@ -115,9 +117,11 @@ class TerminalPollView(APIView):
 
 # ---------- Dashboard (read only) ----------
 class LiveView(APIView):
-    """GET /api/live/ -> everything the dashboard's Live screen shows, in one call
-    (it polls every 2 s): the running trip, its totals, whether the terminal is
-    linked, and the latest taps of this trip, newest first."""
+    """GET /api/live/ -> everything the operator dashboard's Live screen shows, in
+    one call (it polls every 2 s): the running trip, its totals, whether the
+    terminal is linked, and the latest taps of this trip, newest first.
+    Taps carry only the passenger's name and the amount: the crew does not see
+    card IDs or balances."""
 
     def get(self, request):
         try:
@@ -130,7 +134,31 @@ class LiveView(APIView):
             'trip': {**trip_summary(trip), 'started_at': trip.started_at},
             'stats': trip_stats(trip),
             'terminal': terminal_status(),
-            'taps': TransactionSerializer(taps, many=True).data,
+            'taps': OperatorTapSerializer(taps, many=True).data,
+        })
+
+
+class TripListView(APIView):
+    """GET /api/trips/ -> the latest trips (running one first) with their totals,
+    and the totals for today across all trips."""
+
+    def get(self, request):
+        trips = Trip.objects.select_related('route').order_by('-id')[:TRIP_HISTORY]
+        today = timezone.localdate()
+        today_taps = Transaction.objects.filter(
+            kind=Transaction.Kind.TAP, result=Transaction.Result.PAID, created_at__date=today)
+        return Response({
+            'today': {
+                'collected': sum(today_taps.values_list('amount', flat=True)),
+                'paid': today_taps.count(),
+                'trips': Trip.objects.filter(started_at__date=today).count(),
+            },
+            'trips': [{
+                **trip_summary(t),
+                'started_at': t.started_at,
+                'ended_at': t.ended_at,
+                'stats': trip_stats(t),
+            } for t in trips],
         })
 
 

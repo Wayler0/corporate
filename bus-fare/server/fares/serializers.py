@@ -59,3 +59,12 @@ class PassengerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Passenger
         fields = ['card_uid', 'name', 'balance']
+
+
+class OperatorTapSerializer(serializers.ModelSerializer):
+    """What the bus crew sees for one tap: who and how much. No card ID, no balance."""
+    name = serializers.CharField(source='passenger.name', default=None)
+
+    class Meta:
+        model = Transaction
+        fields = ['id', 'result', 'name', 'amount', 'created_at']

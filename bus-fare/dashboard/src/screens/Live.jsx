@@ -7,7 +7,7 @@ import { Banner, Loading, ResultBadge, ServerProblem } from '../components/ui.js
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
   { id: 'paid', label: 'Paid', test: (t) => t.result === 'PAID' },
-  { id: 'not', label: 'Not paid', test: (t) => t.result !== 'PAID' },
+  { id: 'declined', label: 'Declined', test: (t) => t.result === 'LOW' || t.result === 'UNKNOWN' },
 ]
 
 export default function Live() {
@@ -37,7 +37,7 @@ export default function Live() {
   }
   const fresh = highlight.current.fresh
 
-  const counts = { all: taps.length, paid: taps.filter(FILTERS[1].test).length, not: taps.filter(FILTERS[2].test).length }
+  const counts = { all: taps.length, paid: taps.filter(FILTERS[1].test).length, declined: taps.filter(FILTERS[2].test).length }
   const shown = taps.filter(FILTERS.find((f) => f.id === filter).test)
   const online = terminal.online && !poll.error
 
@@ -59,14 +59,14 @@ export default function Live() {
         {!poll.error && !terminal.online && (
           <Banner>
             Terminal not linked{terminal.last_seen ? ` since ${clock(terminal.last_seen)}` : ''}. It keeps
-            charging on its own, but those taps do not reach the server, so balances may differ.
+            charging cards on its own, but those payments will not show here.
           </Banner>
         )}
 
         <section className="stats card" aria-label="This trip">
           <div><span className="label">Collected</span><strong>{money(stats.collected)}</strong></div>
           <div><span className="label">Paid</span><strong className="fg-paid">{stats.paid}</strong></div>
-          <div><span className="label">Not paid</span><strong className="fg-refused">{stats.refused + stats.repeat}</strong></div>
+          <div><span className="label">Declined</span><strong className="fg-refused">{stats.refused}</strong></div>
         </section>
 
         <section className="stack">
@@ -90,13 +90,10 @@ export default function Live() {
                 <li key={t.id} className={fresh.has(t.id) ? 'item fresh' : 'item'}>
                   <ResultBadge result={t.result} />
                   <div className="grow">
-                    <span className="name">{t.name || 'Unknown card'}</span>
-                    <span className="muted small"><span className="mono">{t.card_uid}</span> · {clock(t.created_at, true)}</span>
+                    <span className="name">{t.name || 'Unregistered card'}</span>
+                    <span className="muted small">{clock(t.created_at, true)}</span>
                   </div>
-                  <div className="end">
-                    <span className="num strong">{t.amount ? `−${t.amount}` : '—'}</span>
-                    {t.result !== 'UNKNOWN' && <span className="num muted small">Bal {t.balance_after}</span>}
-                  </div>
+                  <span className="amount num">{t.amount ? money(t.amount) : '—'}</span>
                 </li>
               ))}
             </ul>
