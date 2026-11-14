@@ -22,9 +22,10 @@ For the tidy boxed version, see **section 8: Final neat build**.
 | RC522 RFID reader | 10, 11, 12, 13, 9, 3.3V, GND |
 | 16×2 LCD with I2C backpack | A4, A5, 5V, GND (4 wires) |
 | Speaker (optional) | 8, GND |
+| GSM module SIM800C (roadmap, not used by the fare firmware) | 2, 3, 5V, GND (pin 4 planned for power-on) |
 
 No pin is used twice, so everything can be connected at the same time.
-Pins 2–7 are free now that the LCD uses the backpack.
+Pins 5–7 are free.
 
 ---
 
@@ -203,6 +204,81 @@ current. Put a resistor in series.
 
 ---
 
+## 4d. GSM module: SIM800C board (tested 14 Nov, without SIM)
+
+**Not needed for the demo**: the terminal reaches the server over the laptop's USB
+cable. This is for the roadmap (SMS receipts, a terminal that works inside a bus
+without a laptop). The fare firmware does not use it yet; it can stay connected.
+
+The board is a blue **"SIM800C GSM/GPRS BOARD"** (lent, often called "SIM800L").
+It takes 5V and has its own level shifting, so it is safe on the Uno.
+
+### Connections (soldered 8-pin header)
+
+| Module label | → Uno | Notes |
+|---|---|---|
+| **5V** | 5V (breadboard + rail is fine) | power |
+| **V_TTL** | 5V | sets its signals to 5V, to match the Uno |
+| **GND** | GND | must be shared with the Uno |
+| **TXD** | **pin 2** | module talks, Uno listens |
+| **RXD** | **pin 3** | Uno talks, module listens |
+| DTR, SPKP, SPKN | *(empty)* | |
+
+The other row of holes (no pins) reads, starting at the **square** hole beside the
+antenna socket:
+
+```
+ [VBAT]  GND   PWX   GND   VRTC   RI   MICP   MICN
+   □      ○     ○     ○     ○      ○     ○      ○
+```
+
+### Switching it on: PWX (important)
+The chip does **not** start by itself. Only the blue **POWER** light comes on and the
+module answers nothing. To start it:
+
+1. With the board powered, bridge **PWX** (3rd hole from the square one) to the
+   **GND** hole beside it for **2 seconds**, using a jumper tip or a resistor leg.
+2. The **status LED** next to POWER starts **blinking**: the chip is on.
+
+⚠️ Count from the **square** hole: that is **VBAT**. Never bridge VBAT to GND.
+
+Resetting or re-uploading the Uno does not switch the module off. Unplugging the
+power does, and then PWX is needed again. *(Planned: a pin in PWX wired to Uno pin 4
+so the Uno switches it on at start-up.)*
+
+### Antenna
+The gold **GSM_ANT** socket needs an antenna with a small snap-on **IPEX (u.FL)**
+plug, 900/1800 MHz. None came with the board (Kim asked, 14 Nov). Without it the
+signal is weak but the module still works for testing.
+
+### Checking it
+Upload `check_sim800l`, switch the chip on with PWX, open the Serial Monitor (9600,
+**Both NL & CR**). Results on 14 Nov, no SIM, no antenna:
+
+| Command | Answer | Meaning |
+|---|---|---|
+| `AT` | `OK` | wiring and power OK |
+| `ATI` | `SIM800 R14.18` | model and firmware |
+| `AT+CPIN?` | `ERROR` | no SIM card (expected) |
+| `AT+CSQ` | `+CSQ: 8,0` | signal 8 of 31: weak but present |
+| `AT+CBC` | `+CBC: 0,58,3867` | supply 3867 mV: healthy |
+
+The LED module shows 🟢 if the module answers, 🔴 if not.
+
+| Problem | Fix |
+|---|---|
+| Only the blue POWER light, `NO ANSWER` | Chip is off: do the PWX step |
+| Status LED blinks but `NO ANSWER` | Swap the TXD/RXD wires; check V_TTL is on 5V |
+| Lights flicker, or the Uno restarts | Not enough current: separate 5V 2A supply (GND joined to the Uno's) |
+
+### With a SIM card (not yet tested)
+- It then **needs its own 5V 2A supply** (phone charger or power bank), GND joined
+  to the Uno's. USB from the laptop is not enough when it transmits.
+- SIM holder is on the back of the board. SIM800 is **2G only**: check the network
+  still offers 2G in your area.
+
+---
+
 ## 5. Power
 
 | Source | Plug into |
@@ -224,9 +300,10 @@ For the demo linked to the dashboard, the Uno is powered by the laptop's USB cab
 anyway, because that cable also carries the data.
 
 **No SIM card is needed for the demo.** The terminal talks to the server through
-the laptop's USB cable. The borrowed SIM800L (GSM) and the ESP32 (Wi-Fi) are
-roadmap items for a terminal that works inside a real bus; the SIM800L would also
-need a SIM card and its own ~4V 2A power supply. Neither has been wired or tested.
+the laptop's USB cable. The borrowed GSM module (section 4d) and the ESP32 (Wi-Fi)
+are roadmap items for a terminal that works inside a real bus. The GSM module is
+wired and answers commands; with a SIM it needs its own 5V 2A supply. The ESP32 has
+not been tried.
 
 ---
 
@@ -239,6 +316,7 @@ need a SIM card and its own ~4V 2A power supply. Neither has been wired or teste
 | `terminal_mvp` | **The demo firmware (use this one).** Standalone fare terminal that links to the server when the laptop bridge is running |
 | `check_lcd` | Live LCD wiring check |
 | `check_rc522` | Live reader check on the LED |
+| `check_sim800l` | GSM module check (section 4d); works without a SIM |
 | `stage1_read_card` … `stage5_i2c_lcd_fare` | Earlier steps, kept for reference |
 
 **Plug and play:** with `terminal_mvp` loaded, just plug in the USB. An LCD or
