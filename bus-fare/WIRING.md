@@ -1,7 +1,8 @@
 # Bus Fare Terminal: Wiring Manual
 
 How to connect everything on the Arduino Uno, step by step. Everything here was
-tested on the real kit (11–12 Nov 2026) unless marked **(not yet tested)**.
+tested on the real kit (11–14 Nov 2026) unless marked **(not yet tested)**.
+For the tidy boxed version, see **section 8: Final neat build**.
 
 **Golden rules**
 
@@ -50,11 +51,12 @@ Push the module's 4 pins straight into the **ANALOG IN** header:
 
 ## 3. RC522 RFID reader (7 male-to-female wires)
 
-### Fitting the pins without soldering
-1. Push the **straight 8-pin strip** through the RC522's 8 holes, from the chip side.
-2. **Tilt it slightly** so every pin presses against the side of its hole.
-3. Hold it with a **clothes peg or binder clip** (stronger than tape).
-4. Push the **female** end of each wire onto a pin; the **male** end goes into the Uno.
+The 8-pin header is **soldered** (14 Nov, tested working). Push the **female** end
+of each wire onto a pin; the **male** end goes into the Uno.
+
+*Spare reader with no soldering:* push the straight pin strip through the holes,
+tilt it so every pin presses against its hole, and hold it with a binder clip.
+This works for testing but comes loose easily.
 
 ### Connections
 Follow the labels printed on the RC522, not the positions:
@@ -178,7 +180,7 @@ Setup (needs the RC522's **straight** pin strip soldered, and 8 male-to-male wir
 
 ---
 
-## 4c. Speaker (optional, not yet tested)
+## 4c. Speaker (tested 14 Nov)
 
 A small speaker must never be wired straight to an Uno pin: it draws far too much
 current. Put a resistor in series.
@@ -188,9 +190,14 @@ current. Put a resistor in series.
  Uno GND   ───────────── speaker (−)
 ```
 
-- 220Ω = red, red, brown. It will be quiet; that is expected with no amplifier.
-- The firmware already makes the sounds: short high beep = paid, medium beep =
-  already paid, long low buzz = refused.
+- 220Ω = red, red, brown (150–330Ω also fine). It is quiet with no amplifier;
+  a box with holes in front of the speaker makes it noticeably louder.
+- Sounds (all near 3 kHz, where small speakers are loudest):
+  **1 beep** = paid · **2 short beeps** = already paid · **3 short + 1 long** = refused.
+- Speaker wires are very thin: solder them, or twist and fold the bare ends so they
+  grip in the breadboard. ⚠️ On 14 Nov a stray speaker wire froze the Uno (uploads
+  failed with `programmer is not responding`). If that happens: unplug, check no bare
+  strand touches another pin, plug back in.
 - If the "speaker" is a module with 3 pins or its own amplifier board, the wiring
   is different: ask before connecting.
 
@@ -235,6 +242,8 @@ reader connected late, or pushed back after coming loose, is picked up within
 
 **Upload from the IDE:** open the `.ino` → Tools → Board → Arduino Uno →
 Port `/dev/ttyACM0` → Upload (→ button).
+After unplugging and replugging, the port can come back as `/dev/ttyACM1`: pick
+whichever one is listed (`ls /dev/ttyACM*`).
 
 **Upload from the terminal:**
 ```
@@ -286,6 +295,12 @@ Ignore every other line the Uno prints; those are for people. If no `RES` arrive
 in 2 seconds, or no `LINK` for 8 seconds, the terminal carries on by itself.
 
 To test the terminal without the real backend: `python3 tools/fake_server.py`
+(add the port if it is not `/dev/ttyACM0`, e.g. `python3 tools/fake_server.py /dev/ttyACM1`).
+
+**Tested on the real Uno, 14 Nov:** `LINK` → `*` on the LCD; taps answered `RES PAID`
+and `RES REPEAT`; a `MSG` top-up appeared on the LCD; stopping the server removed
+the `*` and the terminal carried on alone. In online mode the **server's balance is
+the real one**; the Uno copies it so offline mode continues from the same number.
 
 ---
 
@@ -293,10 +308,66 @@ To test the terminal without the real backend: `python3 tools/fake_server.py`
 
 | Item | Approx. KSh | For |
 |---|---|---|
-| Male-to-male jumper wires (40-pack) | 100–200 | LCD through the breadboard |
-| 10k potentiometer | 30–100 | LCD contrast (optional) |
-| Active buzzer | 50–150 | Beep on paid/refused |
-| Soldering at a repair shop | 50–100 | Makes the RC522 and LCD connections permanent |
+| Male-to-female jumpers, 20 cm (20+) | 100–200 | Reaching the lid in the neat build |
+| Male-to-male jumpers (10+) | 100–200 | Breadboard power rails |
+| Active buzzer module (optional) | 50–150 | Louder than the bare speaker |
+| Project box or plastic food container | — | Enclosure (**not metal**) |
+| Hot glue, double-sided tape, cable ties | — | Mounting and tidying |
 | Power bank (or one you own) | — | Running away from the laptop |
 
 *Prices are rough estimates, not quotes.*
+
+---
+
+## 8. Final neat build
+
+### Power through the breadboard rails
+Instead of one wire per module on the Uno's few GND pins, feed the rails once:
+
+```
+ Uno 5V   ── red ────► top    +  rail   → LCD VCC
+ Uno GND  ── black ──► top    −  rail   → LCD GND, speaker (−)
+ Uno 3.3V ── orange ─► bottom +  rail   → RC522 3.3V ONLY
+ Uno GND  ── black ──► bottom −  rail   → RC522 GND
+```
+
+⚠️ Keep **3.3V and 5V on opposite sides** of the breadboard and mark the 3.3V rail
+with tape. 5V on the reader destroys it.
+
+Colours: **red = 5V, orange = 3.3V, black = GND**, anything else = signals.
+Signal wires (SDA/SCL, SPI pins 9–13, pin 8) still go straight to the Uno as in
+sections 3, 4 and 4c.
+
+### Enclosure
+Plastic or wood only: the reader works through about 3 mm of it, not through metal.
+
+```
+        LID (passenger side)
+  ┌───────────────────────────────────┐
+  │   ┌───────────────────────┐   ●   │  ● RGB LED in a small hole
+  │   │ PAID KSh 50        *  │       │
+  │   │ Bal: KSh 550          │  ::: │  ::: speaker holes
+  │   └───────────────────────┘       │
+  │        ┌───────────────┐          │
+  │        │  TAP CARD ))) │          │  RC522 fixed flat under the lid
+  │        └───────────────┘          │
+  └───────────────────────────────────┘
+          USB cable out of the side
+```
+
+- **LCD:** cut a window; hold it from behind with hot glue or tape. Don't stress the
+  backpack flap.
+- **RC522:** face-up, directly under a "TAP CARD" label.
+- **RGB LED:** move it off A0–A3 onto 4 M-F wires (same pins, R→A0 G→A1 B→A2
+  GND→A3) so it shows through the lid. No code change.
+- **Speaker:** face-down behind small holes; glue the edge.
+- **Uno and breadboard:** stuck to the floor (the breadboard has a sticky back).
+- Bundle each module's wires with tape or cable ties, and leave slack so opening the
+  lid doesn't pull anything out.
+
+Wires needed: LCD 4 + reader 7 + LED 4 + speaker 2 + rails 4 ≈ **21**.
+
+### Before closing the box
+1. ON light on, LED self-test red → green → blue, LCD shows the route.
+2. Run the **Full test** in section 6.
+3. Shake the box gently and tap again: if anything drops out, a joint is loose.
