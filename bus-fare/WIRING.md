@@ -19,10 +19,11 @@ tested on the real kit (11–12 Nov 2026) unless marked **(not yet tested)**.
 |---|---|
 | RGB LED module | A0, A1, A2, A3 (plugged straight in, no wires) |
 | RC522 RFID reader | 10, 11, 12, 13, 9, 3.3V, GND |
-| 16×2 LCD | 7, 6, 5, 4, 3, 2, 5V, GND (+ A5 for the backlight) |
-| Buzzer (later) | 8 |
+| 16×2 LCD with I2C backpack | A4, A5, 5V, GND (4 wires) |
+| Speaker (optional) | 8, GND |
 
 No pin is used twice, so everything can be connected at the same time.
+Pins 2–7 are free now that the LCD uses the backpack.
 
 ---
 
@@ -89,95 +90,109 @@ Follow the labels printed on the RC522, not the positions:
 
 ---
 
-## 4. 16×2 LCD
+## 4. 16×2 LCD with I2C backpack (4 male-to-female wires)
 
-Your LCD's labels, in order: **GND VDD VO RS RW E D0 D1 D2 D3 D4 D5 D6 D7 BLA BLK**
-(pin 1 = GND at one end, pin 16 = BLK at the other).
+The backpack is soldered to the LCD and hangs off the front edge like a flap
+(checked from photos on 14 Nov: pin 1 meets pin 1, so it is electrically correct).
+It is held only by its pins: **do not bend or lever it.** It cannot sit in the
+breadboard, so wire it straight to the Uno.
 
-### 4a. Temporary setup: 10 male-to-female wires, no backlight (what works now)
+**Follow the labels printed on the backpack, not the positions:**
 
-Used while the RC522's wires are borrowed. Push the 16-pin strip through the LCD's
-holes, tilt it and clamp it, then put the female ends on the pins:
-
-| LCD | → Uno |
+| Backpack label | → Uno |
 |---|---|
 | GND | GND |
-| VDD | **5V** |
-| VO | GND |
-| RS | 7 |
-| RW | GND |
-| E | 6 |
-| D0, D1, D2, D3 | *(leave empty)* |
-| D4 | 5 |
-| D5 | 4 |
-| D6 | 3 |
-| D7 | 2 |
-| BLA, BLK | *(leave empty)* |
+| VCC | **5V** |
+| SDA | A4 |
+| SCL | A5 |
 
-The Uno has 3 GND pins (two next to 5V, one next to pin 13): GND, VO and RW use one each.
-Without the backlight, tilt the screen towards the light to read it.
+```
+ Uno POWER header:   IOREF  RESET  3.3V   5V   GND   GND   VIN
+                                           ▲     ▲
+                                     LCD VCC   LCD GND
+ Uno ANALOG IN:   A0   A1   A2   A3   A4    A5
+                  └─ RGB LED module ─┘ SDA   SCL
+```
 
-### 4b. Final setup: through the breadboard with male-to-male wires (not yet tested)
+⚠️ **GND and VCC must not be swapped.** On 14 Nov the LCD did not answer and the
+data lines measured about 4.5V and could not be pulled low: the signature of
+reversed power. Reversed power can destroy the backpack's chip. Check these two
+wires twice before plugging in the USB.
 
-This frees the male-to-female wires for the RC522 and adds the backlight.
+- The two-pin jumper marked **LED** must stay on, or the backlight is off.
+- The **blue screw** is the contrast: if the backlight is on but there is no text,
+  turn it slowly with a small screwdriver.
+- The LCD's address is found automatically; nothing to set.
 
-**Breadboard basics:** the long lines along the edges marked **+** (red) and **−** (blue)
-are *rails*: every hole in one line is connected. In the middle, each numbered *column*
-of 5 holes (a–e) is connected; the gap in the middle separates a–e from f–j.
+### Checking it
+Upload `check_lcd` and open the Serial Monitor (9600). Once a second it reports:
 
-**Step 1: power rails (2 male-to-male wires)**
-- Uno **5V** → breadboard **+ rail**
-- Uno **GND** → breadboard **− rail**
-
-**Step 2: seat the LCD**
-- Push the 16-pin strip into row **a** of 16 neighbouring columns, so each LCD pin has its own column.
-- Put the LCD on the strip, tilt it slightly and clamp it (like the RC522).
-- Write down which column each LCD pin is in (e.g. GND = column 10 … BLK = column 25).
-
-**Step 3: connect each LCD column (male-to-male wires into the same column, rows b–e)**
-
-| LCD pin's column | → |
+| It says | Meaning |
 |---|---|
-| GND | − rail |
-| VDD | + rail |
-| VO | − rail through a **1k resistor** (or a 10k potentiometer's middle leg: outer legs to + and −) |
-| RS | Uno 7 |
-| RW | − rail |
-| E | Uno 6 |
-| D0–D3 | *(nothing)* |
-| D4 | Uno 5 |
-| D5 | Uno 4 |
-| D6 | Uno 3 |
-| D7 | Uno 2 |
-| BLA | **220Ω resistor** → a free column → wire to Uno **A5** |
-| BLK | − rail |
+| `device at 0x27` (or another number) | Working. The screen shows `LCD OK` |
+| `nothing connected` on SDA or SCL | That wire is loose, or the backpack has no power |
+| `connected` on both, but `no device answers` | Power is wrong (GND/VCC swapped or on the wrong Uno pin), or the chip is damaged |
+| `STUCK LOW` | That data wire is touching GND |
+| `SDA and SCL wires are CROSSED` | Swap the A4 and A5 wires |
 
-**Resistor colours** (read from the end with the bands closest together):
-- 220Ω = red, red, brown (or red, red, black, black on 5-band resistors)
-- 1kΩ = brown, black, red (or brown, black, black, brown)
+| Problem | Fix |
+|---|---|
+| Backlight off | GND or VCC wire, or the LED jumper is missing |
+| Backlight on, no text | Turn the blue screw; then run `check_lcd` |
+| Top row of solid blocks | Chip answers but the LCD got no data: a bad solder joint between backpack and LCD |
+| Strange symbols | A bad solder joint on one of the 16 pins |
 
-**Contrast:** with VO straight to GND the text is darkest. If you see dark blocks
-instead of letters, put a resistor between VO and GND (try 1k, then 2.2k), or use
-a 10k potentiometer and turn it until the text is clear.
-
-**Step 4: put the RC522 back** on 7 male-to-female wires (section 3).
-
-### What the LCD shows (Stage 4)
+### What the LCD shows
 
 | When | Line 1 | Line 2 |
 |---|---|---|
 | Waiting | `Campus shuttle` | `KSh 50  Tap card` |
+| Linked to the server | `Campus shuttle *` | `KSh 50  Tap card` |
+| Asking the server | `Checking...` | card ID |
 | Paid | `PAID KSh 50` | `Bal: KSh 450` |
 | Already paid | `Already paid` | `Bal: KSh 450` |
 | Not enough money | `Low balance` | `Has 30 need 50` |
 | Unknown card | `Unknown card` | `See conductor` |
+| Reader not connected | `Campus shuttle` | `Check reader!` |
 
-| Problem | Fix |
-|---|---|
-| Top row of solid blocks | Has power, no data: check RS, E, D4–D7 |
-| Nothing at all | Check GND and VDD; check contrast (VO) |
-| Strange symbols | Two of D4–D7 are swapped |
-| Text very faint | No backlight: wire BLA/BLK (4b), or more light |
+*(The old 16-wire connection without a backpack is described at the top of
+`stage4_lcd_fare.ino`, if it is ever needed again.)*
+
+---
+
+## 4b. Using the breadboard (for the RC522)
+
+- Each numbered **column of 5 holes** (a–e, or f–j) is one connection.
+  Neighbouring columns are separate. The gap in the middle separates e from f.
+- The long **+** and **−** lines along the edges are *rails*: one connection along
+  the whole edge.
+
+Setup (needs the RC522's **straight** pin strip soldered, and 8 male-to-male wires):
+
+1. Push the RC522's 8 pins into **row e**, one per column, with the reader's body
+   lying over the gap. Holes a–d of each column stay free for wires.
+2. One wire: Uno **GND** → **−** rail.
+3. A wire from each pin's column (rows a–d) to the Uno, as in the table in section 3.
+   GND goes to the − rail; **3.3V goes straight to the Uno's 3.3V pin**.
+4. **Leave the + rail empty**, so 5V can never reach the reader.
+
+---
+
+## 4c. Speaker (optional, not yet tested)
+
+A small speaker must never be wired straight to an Uno pin: it draws far too much
+current. Put a resistor in series.
+
+```
+ Uno pin 8 ──[ 220Ω ]── speaker (+)
+ Uno GND   ───────────── speaker (−)
+```
+
+- 220Ω = red, red, brown. It will be quiet; that is expected with no amplifier.
+- The firmware already makes the sounds: short high beep = paid, medium beep =
+  already paid, long low buzz = refused.
+- If the "speaker" is a module with 3 pins or its own amplifier board, the wiring
+  is different: ask before connecting.
 
 ---
 
@@ -192,6 +207,15 @@ a 10k potentiometer and turn it until the text is clear.
 
 Use one power source at a time.
 
+**Phone battery (3.7V lithium cell):** it cannot run the Uno by itself; the Uno
+needs 5V. It is only usable through a board that boosts it to 5V and has a USB
+socket (that is what a power bank is). Never connect a bare lithium cell to the
+Uno's 5V or VIN pin, never short its terminals, and never charge it without a
+proper charging board. *(Your battery system has not been identified yet.)*
+
+For the demo linked to the dashboard, the Uno is powered by the laptop's USB cable
+anyway, because that cable also carries the data.
+
 ---
 
 ## 6. Uploading and testing
@@ -200,18 +224,21 @@ Use one power source at a time.
 
 | Folder | What it does |
 |---|---|
-| `stage1_read_card` | Prints the ID of any card tapped |
-| `stage2_lcd` | Shows the tapped card's ID on the LCD |
-| `stage3_fare` | Fare system, Serial Monitor + LED |
-| `stage4_lcd_fare` | Fare system + LCD (**the current version**) |
+| `terminal_mvp` | **The demo firmware (use this one).** Standalone fare terminal that links to the server when the laptop bridge is running |
+| `check_lcd` | Live LCD wiring check |
 | `check_rc522` | Live reader check on the LED |
+| `stage1_read_card` … `stage5_i2c_lcd_fare` | Earlier steps, kept for reference |
+
+**Plug and play:** with `terminal_mvp` loaded, just plug in the USB. An LCD or
+reader connected late, or pushed back after coming loose, is picked up within
+2 seconds. Nothing needs to be configured.
 
 **Upload from the IDE:** open the `.ino` → Tools → Board → Arduino Uno →
 Port `/dev/ttyACM0` → Upload (→ button).
 
 **Upload from the terminal:**
 ```
-arduino --upload --board arduino:avr:uno --port /dev/ttyACM0 bus-fare/stage4_lcd_fare/stage4_lcd_fare.ino
+arduino --upload --board arduino:avr:uno --port /dev/ttyACM0 bus-fare/terminal_mvp/terminal_mvp.ino
 ```
 
 **Serial Monitor:** 9600 baud, line ending **Newline**. Commands:
@@ -239,8 +266,26 @@ arduino --upload --board arduino:avr:uno --port /dev/ttyACM0 bus-fare/stage4_lcd
 | 7 | Unplug, plug back in, tap white card | 🟡 | `Already paid` (remembered) |
 | 8 | `trip`, tap white card | 🟢 | `PAID KSh 50` / `Bal: KSh 400` |
 
-**Library needs** (Tools → Manage Libraries): `MFRC522` by GithubCommunity,
-`LiquidCrystal` by Arduino.
+**Library needs** (Tools → Manage Libraries): `MFRC522` by GithubCommunity.
+
+### Link to the server (for the backend developer)
+
+9600 baud, one line each. The laptop "bridge" program sits between the Uno and the server.
+
+| Direction | Line | Meaning |
+|---|---|---|
+| Uno → laptop | `READY` | Terminal has started (opening the port restarts the Uno; wait for this) |
+| Uno → laptop | `TAP E5734107` | A card was tapped |
+| laptop → Uno | `LINK` | Heartbeat: send every 2–3 s while the server is up |
+| laptop → Uno | `RES PAID 50 450` | Answer to a tap within 2 s: result, fare, new balance. Result is `PAID`, `REPEAT`, `LOW` or `UNKNOWN` |
+| laptop → Uno | `MSG Top-up +100\|Bal: KSh 130` | Show two lines of text on the LCD |
+| laptop → Uno | `FARE 70` | Change the fare |
+| laptop → Uno | `trip` | Start a new trip |
+
+Ignore every other line the Uno prints; those are for people. If no `RES` arrives
+in 2 seconds, or no `LINK` for 8 seconds, the terminal carries on by itself.
+
+To test the terminal without the real backend: `python3 tools/fake_server.py`
 
 ---
 
