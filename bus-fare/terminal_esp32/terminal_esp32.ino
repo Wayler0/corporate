@@ -76,7 +76,6 @@ static_assert(PASSENGER_COUNT <= 32, "trip-paid flags fit in 32 bits");
 // ---------- Settings ----------
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
-const unsigned long LCD_MESSAGE_MS = 3000;
 const unsigned long TAP_TIMEOUT_MS = 3000;     // server must answer a tap within this
 const unsigned long POLL_EVERY_MS = 2000;      // ask for messages this often when online
 const unsigned long RETRY_EVERY_MS = 5000;     // try to reach the server this often when offline
@@ -139,14 +138,66 @@ bool lcdFind() {
   if (lcdAddr) lcdInit();
   return lcdAddr != 0;
 }
-void lcdLine(uint8_t row, const String &text) {
+// ---- Text on the 16x2 screen. A line longer than its space scrolls right to
+// left (ticker style). A line can end in a fixed mark (the '*') that never scrolls.
+const unsigned long SCROLL_STEP_MS = 350;   // one character every 350 ms
+const unsigned long SCROLL_HOLD_MS = 1200;  // pause at the start so the beginning can be read
+const char *SCROLL_GAP = "   ";             // space between the end and the start again
+String lcdText[2];
+char lcdMark[2] = {0, 0};
+uint16_t lcdOffset[2] = {0, 0};
+unsigned long lcdScrollAt[2] = {0, 0};
+unsigned long lcdMessageMs = 3000;          // how long the current message stays up
+
+uint8_t lcdSpace(uint8_t row) { return lcdMark[row] ? 15 : 16; }
+
+void lcdDraw(uint8_t row) {
   if (!lcdAddr) return;
+  const String &t = lcdText[row];
+  uint8_t space = lcdSpace(row);
+  String loop = t.length() > space ? t + SCROLL_GAP + t : t;
   lcdSend(row ? 0xC0 : 0x80, 0);
-  for (uint8_t i = 0; i < 16; i++) lcdSend(i < text.length() ? text[i] : ' ', 1);
+  for (uint8_t i = 0; i < space; i++) {
+    uint16_t k = lcdOffset[row] + i;
+    lcdSend(k < loop.length() ? loop[k] : ' ', 1);
+  }
+  if (lcdMark[row]) lcdSend(lcdMark[row], 1);
 }
+
+void lcdLineMark(uint8_t row, const String &text, char mark) {
+  lcdText[row] = text;
+  lcdMark[row] = mark;
+  lcdOffset[row] = 0;
+  lcdScrollAt[row] = millis() + SCROLL_HOLD_MS;
+  lcdDraw(row);
+}
+void lcdLine(uint8_t row, const String &text) { lcdLineMark(row, text, 0); }
+
+// Called from loop(): moves long lines on by one character
+void lcdScroll() {
+  for (uint8_t row = 0; row < 2; row++) {
+    uint16_t len = lcdText[row].length();
+    if (len <= lcdSpace(row) || (long)(millis() - lcdScrollAt[row]) < 0) continue;
+    lcdOffset[row]++;
+    lcdScrollAt[row] = millis() + SCROLL_STEP_MS;
+    if (lcdOffset[row] >= len + strlen(SCROLL_GAP)) {  // back at the start: pause again
+      lcdOffset[row] = 0;
+      lcdScrollAt[row] = millis() + SCROLL_HOLD_MS;
+    }
+    lcdDraw(row);
+  }
+}
+
+// Time to show a line once in full (scrolled all the way round), at least 3 s
+unsigned long lcdReadTime(const String &t) {
+  if (t.length() <= 16) return 3000;
+  return SCROLL_HOLD_MS + (t.length() + strlen(SCROLL_GAP)) * SCROLL_STEP_MS + 500;
+}
+
 void lcdMessage(const String &l1, const String &l2) {
   lcdLine(0, l1);
   lcdLine(1, l2);
+  lcdMessageMs = max(lcdReadTime(l1), lcdReadTime(l2));
   lcdMessageAt = millis();
   lcdShowingMessage = true;
 }
@@ -222,12 +273,8 @@ String routeName() { return serverRouteName.length() ? serverRouteName : String(
 
 void lcdIdle() {
   lcdInit();  // self-heal if the display lost power for a moment
-  String top = routeName().substring(0, 14);
-  if (serverOnline) {
-    while (top.length() < 15) top += ' ';
-    top += '*';
-  }
-  lcdLine(0, top);
+  // '*' in the corner = connected to the server; a long route name scrolls beside it
+  lcdLineMark(0, routeName(), serverOnline ? '*' : 0);
   lcdLine(1, readerOk ? String("KSh ") + currentFare() + "  Tap card" : String("Check reader!"));
   lcdShowingMessage = false;
 }
@@ -682,7 +729,8 @@ void loop() {
     pollServer();
   }
 
-  if (lcdShowingMessage && millis() - lcdMessageAt > LCD_MESSAGE_MS) lcdIdle();
+  if (lcdShowingMessage && millis() - lcdMessageAt > lcdMessageMs) lcdIdle();
+  lcdScroll();
 
   char line[LINE_LEN];
   if (readLine(line)) handleLine(line);
