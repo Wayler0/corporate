@@ -77,7 +77,7 @@ static_assert(PASSENGER_COUNT <= 32, "trip-paid flags fit in 32 bits");
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
 const unsigned long LCD_MESSAGE_MS = 3000;
-const unsigned long TAP_TIMEOUT_MS = 2000;     // server must answer a tap within this
+const unsigned long TAP_TIMEOUT_MS = 3000;     // server must answer a tap within this
 const unsigned long POLL_EVERY_MS = 2000;      // ask for messages this often when online
 const unsigned long RETRY_EVERY_MS = 5000;     // try to reach the server this often when offline
 const unsigned long ONLINE_TIMEOUT_MS = 8000;  // no good answer for this long = offline
@@ -94,8 +94,10 @@ unsigned long lcdMessageAt = 0;
 
 bool serverOnline = false;
 unsigned long lastServerOkAt = 0, lastPollAt = 0;
-uint16_t serverFare = 0;          // 0 = use the route's own fare
-String serverRouteName;           // empty = use the route's own name
+// The route and fare the server last told us. Kept (and saved in flash) when the
+// server goes away, so offline taps charge the running trip's fare, not a default.
+uint16_t serverFare = 0;          // 0 = never heard from a server: use the built-in route
+String serverRouteName;           // empty = use the built-in route's name
 bool wifiWasUp = false;
 
 uint16_t balances[PASSENGER_COUNT];
@@ -282,22 +284,32 @@ void markServer(bool ok) {
       lcdMessage("Server linked", "Online mode");
     }
   } else if (serverOnline && millis() - lastServerOkAt > ONLINE_TIMEOUT_MS) {
-    serverOnline = false;
-    serverFare = 0;
-    serverRouteName = "";
-    Serial.println("Server: lost, offline mode");
+    serverOnline = false;  // keep serverFare / serverRouteName: offline uses the last known trip
+    Serial.printf("Server: lost, offline mode (still charging %s, KSh %u)\n", routeName().c_str(), currentFare());
     lcdMessage("Server offline", "Offline mode");
   }
 }
 
+void saveServerTrip() {
+  store.putUShort("sfare", serverFare);
+  store.putString("sroute", serverRouteName);
+}
+
 void fetchStatus() {
   String body;
-  int code = serverRequest("GET", "/api/status/", "", body, 1500);
-  if (code == 200) {
+  int code = serverRequest("GET", "/api/status/", "", body, 3000);
+  if (code != 200) {
+    Serial.printf("Server status: failed (%d)\n", code);
+    return;
+  }
+  {
     long fare = jsonNumber(body, "fare", 0);
     if (fare > 0 && fare <= MAX_BALANCE) serverFare = fare;
-    serverRouteName = jsonString(body, "route_name");
+    String name = jsonString(body, "route_name");
+    if (name.length()) serverRouteName = name;
+    saveServerTrip();
     Serial.printf("Server status: %s, KSh %u\n", routeName().c_str(), currentFare());
+    if (!lcdShowingMessage) lcdIdle();
   }
 }
 
@@ -306,7 +318,7 @@ void handleLine(char *line, bool fromServer = false);  // below
 // Ask the server for waiting messages: {"lines": ["MSG Top-up +100|Bal: KSh 600", "FARE 70"]}
 void pollServer() {
   String body;
-  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, 1500);
+  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, 2500);
   bool wasOnline = serverOnline;
   markServer(code == 200);
   if (code != 200) {
@@ -531,11 +543,13 @@ void handleLine(char *line, bool fromServer) {
     long f = atol(line + 5);
     if (f > 0 && f <= MAX_BALANCE) {
       serverFare = f;
+      saveServerTrip();
       Serial.printf("Fare is now KSh %ld\n", f);
       if (!lcdShowingMessage) lcdIdle();
     }
   } else if (strcasecmp(line, "trip") == 0) {
     newTrip();
+    if (fromServer) fetchStatus();  // the new trip may be on another route: get its name and fare
   } else if (strcasecmp(line, "help") == 0) {
     Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          passengers and offline balances\n  status        Wi-Fi and server\n  route <n>     switch route offline (starts a new trip)\n  trip          new trip\n  reset         restore start balances (offline copy)\n  config        show Wi-Fi / server / token settings\n  wifi <name>|<password>   change Wi-Fi (saved, no upload needed)\n  server <url>  change the server, e.g. server http://192.168.100.33:8000\n  token <token> change the vehicle token\n  config reset  back to the secrets.h defaults");
   } else if (strcasecmp(line, "list") == 0) {
@@ -547,6 +561,9 @@ void handleLine(char *line, bool fromServer) {
     if (n >= 1 && n <= ROUTE_COUNT) {
       currentRoute = n - 1;
       saveRoute();
+      serverFare = 0;            // a route chosen by hand on the terminal wins
+      serverRouteName = "";
+      saveServerTrip();
       newTrip();
     } else {
       Serial.println("No such route.");
@@ -626,10 +643,13 @@ void setup() {
 
   store.begin("fare", false);
   loadConfig();
+  serverFare = store.getUShort("sfare", 0);
+  serverRouteName = store.getString("sroute", "");
   loadState();
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);  // no Wi-Fi power saving: it delays replies and makes requests time out
   WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
 
   Serial.println("\n========================================");
