@@ -504,6 +504,23 @@ Copy `terminal_esp32/secrets.example.h` to `secrets.h` and fill in:
 | `SERVER_URL` | `http://192.168.100.33:8000` | the laptop running the server, same network |
 | `TERMINAL_TOKEN` | `demo-terminal-bus-1` | this vehicle's token from the server (`seed_demo`) |
 
+`secrets.h` only gives the **first** values. After that, change them over the
+USB cable, like adb, with no upload and no network needed:
+
+```
+python3 bus-fare/tools/set_wifi.py "VenueWiFi" "their-password"
+python3 bus-fare/tools/set_wifi.py --server http://192.168.1.20:8000
+python3 bus-fare/tools/set_wifi.py --token demo-terminal-bus-2
+python3 bus-fare/tools/set_wifi.py --show
+```
+
+The settings are saved in the ESP32 and survive power cuts. It reports `WIFI OK`
+or `WIFI FAILED` with the reason (wrong password, 5 GHz network, MAC filter).
+In the Serial Monitor the same works by hand: `wifi <name>|<password>`, `server <url>`,
+`token <token>`, `config`, `config reset`. These commands only work over the
+cable; the server cannot change them. (Tested 15 Nov: wrong network reported,
+switch back OK.)
+
 `secrets.h` is never committed. The server must accept the network address:
 the laptop's IP in `ALLOWED_HOSTS`, started with `runserver 0.0.0.0:8000`.
 

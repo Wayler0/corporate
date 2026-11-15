@@ -137,6 +137,16 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
 - Battery found: a LiPo pouch cell already soldered to a **TP4056** charger board
   ("03962A" is the board's code). Still needs a 5 V boost board (MT3608).
 
+### 15 Nov: Wi-Fi changed over the cable, no code
+- For the demo the Wi-Fi must be changeable without editing code. A dashboard
+  can't do it at a new venue (the terminal can't hear it until it is on the
+  network), so: **`tools/set_wifi.py`** sends the network name and password over
+  the USB cable (like adb); the ESP32 saves them in flash and reports
+  `WIFI OK`/`WIFI FAILED`. Server address and token change the same way.
+- Tested: wrong network → clear failure message; switch back → `WIFI OK`.
+- Found and fixed: opening the USB port could hold the ESP32 in reset; the
+  script now restarts it cleanly. Uploads at 921600 baud failed once; 115200 works.
+
 ---
 
 ## Open items
