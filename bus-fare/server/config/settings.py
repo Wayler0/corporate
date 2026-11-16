@@ -26,7 +26,11 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-only-change-me')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+# Extra addresses (e.g. this laptop's Wi-Fi IP so the ESP32 terminal can reach it),
+# comma-separated:  ALLOWED_HOSTS=10.170.92.82 python manage.py runserver 0.0.0.0:8000
+ALLOWED_HOSTS = ['localhost', '127.0.0.1'] + [
+    h.strip() for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h.strip()
+]
 
 
 # Application definition
