@@ -123,7 +123,7 @@ def process_tap(vehicle, card_uid):
 
     # select_for_update locks the passenger's row so two taps at the same
     # moment cannot both take the fare (PostgreSQL/MySQL; SQLite locks the file).
-    passenger = (Passenger.objects.select_for_update().select_related('company')
+    passenger = (Passenger.objects.select_for_update(of=('self',)).select_related('company')
                  .filter(card_uid=card_uid).first())
     if passenger is None or not passenger.active:
         return record(Transaction.Result.UNKNOWN, passenger)
@@ -232,7 +232,7 @@ def sync_offline(vehicle, terminal_id, trip_id, trips_started, taps):
         age = tap.get('seconds_ago')
         at = now - min(timedelta(seconds=age), OFFLINE_MAX_AGE) if age is not None else now
         uid = normalize_card_uid(tap['card_uid'])
-        passenger = (Passenger.objects.select_for_update().select_related('company')
+        passenger = (Passenger.objects.select_for_update(of=('self',)).select_related('company')
                      .filter(card_uid=uid).first())
 
         def record(result, amount=0, balance=0, paid_by='', company=None):
@@ -308,7 +308,7 @@ def block_card(passenger):
 def top_up(passenger, amount, method):
     """Add money to an employee's card. DEMO: no payment provider is connected
     yet, so the payment always succeeds. Real M-Pesa goes here later."""
-    passenger = Passenger.objects.select_for_update().select_related('company').get(pk=passenger.pk)
+    passenger = Passenger.objects.select_for_update(of=('self',)).select_related('company').get(pk=passenger.pk)
     if passenger.company is not None and passenger.company.company_pays:
         raise NotAllowedError(f'{passenger.company.name} pays your fares, so there is nothing to top up.')
     if not method:
