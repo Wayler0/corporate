@@ -53,9 +53,10 @@ const bool SOUND_ON = true;
 const uint16_t NOTE_GAP_MS = 15;  // short silence after every note so repeats are heard apart
 
 const uint16_t REST = 0;
-const uint16_t C6 = 1047, D6 = 1175, E6 = 1319, F6 = 1397, G6 = 1568, A6 = 1760, B6 = 1976;
-const uint16_t C7 = 2093, D7 = 2349, E7 = 2637, F7 = 2794, G7 = 3136, A7 = 3520;
-const uint16_t C8 = 4186;
+// Note names start with N_ because A6, A7 etc. are already ESP32 pin names.
+const uint16_t N_C6 = 1047, N_D6 = 1175, N_E6 = 1319, N_F6 = 1397, N_G6 = 1568, N_A6 = 1760, N_B6 = 1976;
+const uint16_t N_C7 = 2093, N_D7 = 2349, N_E7 = 2637, N_F7 = 2794, N_G7 = 3136, N_A7 = 3520;
+const uint16_t N_C8 = 4186;
 
 struct Note {
   uint16_t freq;
@@ -63,17 +64,17 @@ struct Note {
 };
 
 // Payment went through: bright rising chime
-const Note SOUND_PAID[]    = {{C7, 80}, {E7, 80}, {G7, 160}};
+const Note SOUND_PAID[]    = {{N_C7, 80}, {N_E7, 80}, {N_G7, 160}};
 // Card already paid on this trip: two neutral beeps
-const Note SOUND_REPEAT[]  = {{A6, 90}, {REST, 60}, {A6, 90}};
+const Note SOUND_REPEAT[]  = {{N_A6, 90}, {REST, 60}, {N_A6, 90}};
 // Payment failed - not enough balance: falling "uh-oh" then a long low tone
-const Note SOUND_LOW[]     = {{E7, 120}, {C7, 120}, {REST, 60}, {G6, 400}};
+const Note SOUND_LOW[]     = {{N_E7, 120}, {N_C7, 120}, {REST, 60}, {N_G6, 400}};
 // Payment failed - card not registered / deactivated: harsh triple buzz
-const Note SOUND_UNKNOWN[] = {{D6, 100}, {REST, 50}, {D6, 100}, {REST, 50}, {D6, 300}};
+const Note SOUND_UNKNOWN[] = {{N_D6, 100}, {REST, 50}, {N_D6, 100}, {REST, 50}, {N_D6, 300}};
 // Top-up arrived from the server
-const Note SOUND_TOPUP[]   = {{G6, 70}, {C7, 70}, {E7, 70}, {G7, 70}, {C8, 150}};
+const Note SOUND_TOPUP[]   = {{N_G6, 70}, {N_C7, 70}, {N_E7, 70}, {N_G7, 70}, {N_C8, 150}};
 // Terminal switched on and ready
-const Note SOUND_STARTUP[] = {{C7, 60}, {G7, 120}};
+const Note SOUND_STARTUP[] = {{N_C7, 60}, {N_G7, 120}};
 
 struct Sound {
   const char *name;  // used by the "sound <name>" command
