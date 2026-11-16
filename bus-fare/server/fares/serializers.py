@@ -3,7 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Passenger, Route, Transaction
+from .models import MAX_BALANCE, Passenger, Route, Transaction
 from .services import normalize_card_uid, normalize_phone
 
 
@@ -42,6 +42,22 @@ class TapResponseSerializer(serializers.Serializer):
     result = serializers.CharField()
     fare = serializers.IntegerField()
     balance = serializers.IntegerField()
+
+
+class OfflineTapSerializer(serializers.Serializer):
+    ref = serializers.IntegerField(min_value=0)            # the terminal's own tap number
+    card_uid = CardUidField()
+    fare = serializers.IntegerField(min_value=1, max_value=MAX_BALANCE)
+    trip = serializers.IntegerField(min_value=0)           # server trip the terminal knew (0 = none)
+    offset = serializers.IntegerField(min_value=0, max_value=10000)   # trips started offline since
+    seconds_ago = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+
+
+class OfflineSyncSerializer(serializers.Serializer):
+    terminal = serializers.RegexField(r'^[0-9A-Fa-f]{4,16}$')   # random ID the terminal made itself
+    trip = serializers.IntegerField(min_value=0)
+    trips_started = serializers.IntegerField(min_value=0, max_value=10000)
+    taps = OfflineTapSerializer(many=True, max_length=100)
 
 
 # ---------- Logins ----------

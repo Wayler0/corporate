@@ -7,6 +7,8 @@ urlpatterns = [
     path('tap/', views.TapView.as_view(), name='tap'),
     path('status/', views.StatusView.as_view(), name='status'),
     path('terminal/poll/', views.TerminalPollView.as_view(), name='terminal-poll'),
+    path('terminal/cards/', views.TerminalCardsView.as_view(), name='terminal-cards'),
+    path('terminal/sync/', views.TerminalSyncView.as_view(), name='terminal-sync'),
 
     # Logins
     path('auth/me/', views.MeView.as_view(), name='me'),

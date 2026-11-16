@@ -7,6 +7,7 @@
   me             an employee: their own account only
 """
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.http import HttpResponse
 from django.db import transaction as db_transaction
 from django.db.models import Min, Q
 from django.shortcuts import get_object_or_404
@@ -21,13 +22,14 @@ from .models import Passenger, Profile, Route, Transaction, Trip
 from .permissions import IsCompanyAdmin, IsEmployee, IsOperator, IsTerminal, TerminalAuthentication
 from .serializers import (
     AccountTransactionSerializer, EmployeeSerializer, LoginSerializer, NewTripRequestSerializer,
+    OfflineSyncSerializer,
     OperatorTapSerializer, PasswordChangeSerializer, PaymentMethodSerializer, RouteSerializer,
     TapRequestSerializer, TapResponseSerializer, TopUpSerializer,
 )
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
     block_card, create_employee, get_current_trip, process_tap, reset_password, settlements_total,
-    start_new_trip, tap_totals, terminal_status, top_up, trip_stats,
+    start_new_trip, sync_offline, tap_totals, terminal_cards, terminal_status, top_up, trip_stats,
 )
 
 LIVE_TAPS = 30       # taps on the operator's live screen
@@ -93,6 +95,38 @@ class TerminalPollView(TerminalView):
 
     def post(self, request):
         return Response({'lines': collect_terminal_lines(request.auth)})
+
+
+class TerminalCardsView(TerminalView):
+    """GET /api/terminal/cards/ -> plain text: the running trip and every active
+    card, so the terminal can decide taps by itself when offline. Format in
+    services.terminal_cards."""
+
+    def get(self, request):
+        try:
+            text = terminal_cards(request.auth)
+        except NoRouteError as error:
+            return no_route(error)
+        return HttpResponse(text, content_type='text/plain; charset=utf-8')
+
+
+class TerminalSyncView(TerminalView):
+    """POST /api/terminal/sync/
+    {"terminal": "3F2A9C01", "trip": 12, "trips_started": 1,
+     "taps": [{"ref": 7, "card_uid": "E5734107", "fare": 50, "trip": 12, "offset": 1, "seconds_ago": 300}]}
+    -> {"trip": 14, "fare": 50}   (the running trip after the sync)
+    Payments the terminal took offline. Sending the same taps again is harmless."""
+
+    def post(self, request):
+        serializer = OfflineSyncSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            trip = sync_offline(request.auth, data['terminal'].upper(), data['trip'], data['trips_started'],
+                                data['taps'])
+        except NoRouteError as error:
+            return no_route(error)
+        return Response({'trip': trip.pk, 'fare': trip.route.fare})
 
 
 # =====================================================================

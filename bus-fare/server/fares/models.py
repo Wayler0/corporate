@@ -141,6 +141,14 @@ class Trip(models.Model):
     route = models.ForeignKey(Route, on_delete=models.PROTECT, related_name='trips')
     started_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
+    # A trip the terminal started while offline: "<terminal id>:<server trip>+<n>"
+    terminal_ref = models.CharField(max_length=40, blank=True, default='')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['vehicle', 'terminal_ref'], condition=~models.Q(terminal_ref=''),
+                                    name='one_trip_per_terminal_ref'),
+        ]
 
     def __str__(self):
         return f'Trip {self.pk} on {self.route.name}'
@@ -180,7 +188,11 @@ class Transaction(models.Model):
     method = models.CharField(max_length=6, blank=True)     # top-ups: payment method used
     amount = models.PositiveIntegerField(default=0)         # money that moved (0 for a refusal)
     balance_after = models.PositiveIntegerField(default=0)  # the card's own balance
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)    # offline taps: when the card was tapped
+    # Taken by the terminal while offline and sent later. terminal_ref ("<terminal id>:<n>")
+    # makes a resend harmless: the same tap is never recorded twice.
+    offline = models.BooleanField(default=False)
+    terminal_ref = models.CharField(max_length=40, blank=True, default='')
 
     class Meta:
         ordering = ['-created_at', '-id']
@@ -190,6 +202,10 @@ class Transaction(models.Model):
                 fields=['trip', 'passenger'],
                 condition=models.Q(result='PAID'),
                 name='one_payment_per_card_per_trip',
+            ),
+            models.UniqueConstraint(
+                fields=['vehicle', 'terminal_ref'], condition=~models.Q(terminal_ref=''),
+                name='one_record_per_offline_tap',
             ),
         ]
 
