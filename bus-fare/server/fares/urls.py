@@ -3,6 +3,8 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path('health/', views.HealthView.as_view(), name='health'),
+
     # A vehicle's bridge (Authorization: Terminal <token>)
     path('tap/', views.TapView.as_view(), name='tap'),
     path('status/', views.StatusView.as_view(), name='status'),

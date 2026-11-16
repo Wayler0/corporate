@@ -56,6 +56,16 @@ def statement(passenger):
 # =====================================================================
 # Terminal (the vehicle's bridge)
 # =====================================================================
+class HealthView(APIView):
+    """GET /api/health/ -> {"ok": true} once the database answers (Railway's health check)."""
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        Route.objects.exists()
+        return Response({'ok': True})
+
+
 class TerminalView(APIView):
     authentication_classes = [TerminalAuthentication]
     permission_classes = [IsTerminal]
