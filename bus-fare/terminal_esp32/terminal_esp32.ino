@@ -7,7 +7,7 @@
 //   * Every 2 s it asks the server for messages:  POST /api/terminal/poll/
 //     (top-ups "MSG ...", fare changes "FARE 70", new trips "trip").
 //   * At start-up it asks  GET /api/status/  for the current route and fare.
-//   * Offline mode: no Wi-Fi, or no answer within 2 s, and it decides by itself
+//   * Offline mode: no Wi-Fi, or no answer in time (2 s; 6 s for https), and it decides by itself
 //     from a copy of every card (GET /api/terminal/cards/: balance, blocked,
 //     company pays, already paid this trip), kept in flash. Payments it takes
 //     offline wait in a queue in flash (safe through power cuts) and are sent
@@ -37,6 +37,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <LittleFS.h>
 #include <MFRC522.h>
@@ -154,10 +155,16 @@ const uint8_t SYNC_BATCH = 50;    // taps per sync request (the server takes up 
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
 const unsigned long LCD_MESSAGE_MS = 3000;
-const unsigned long TAP_TIMEOUT_MS = 2000;     // server must answer a tap within this
+// A server on the internet (https://..., e.g. Railway) needs an encrypted handshake
+// on every request and is further away than a laptop on the same Wi-Fi: wait longer.
+const bool SECURE_SERVER = strncmp(SERVER_URL, "https", 5) == 0;
+const unsigned long TAP_TIMEOUT_MS = SECURE_SERVER ? 6000 : 2000;     // server must answer a tap within this
+const unsigned long POLL_TIMEOUT_MS = SECURE_SERVER ? 5000 : 1500;    // a poll while online
+const unsigned long PROBE_TIMEOUT_MS = SECURE_SERVER ? 3000 : 800;    // a poll while offline (blocks taps meanwhile)
+const unsigned long BULK_TIMEOUT_MS = SECURE_SERVER ? 10000 : 5000;   // card list and sync
 const unsigned long POLL_EVERY_MS = 2000;      // ask for messages this often when online
-const unsigned long RETRY_EVERY_MS = 5000;     // try to reach the server this often when offline
-const unsigned long ONLINE_TIMEOUT_MS = 8000;  // no good answer for this long = offline
+const unsigned long RETRY_EVERY_MS = SECURE_SERVER ? 15000 : 5000;    // try to reach the server this often when offline
+const unsigned long ONLINE_TIMEOUT_MS = SECURE_SERVER ? 20000 : 8000; // no good answer for this long = offline
 const unsigned long CARDS_EVERY_MS = 30000;    // refresh the card list this often when online
 const uint8_t LINE_LEN = 64;
 
@@ -442,19 +449,31 @@ long jsonNumber(const String &json, const char *key, long fallback) {
 }
 
 // ---------- Talking to the server ----------
+// One connection to the server, kept open and reused by every tap and poll. Over
+// https a new connection costs an encrypted handshake (seconds from Kenya to the
+// cloud); reusing it brings a tap down to one round trip.
+WiFiClient plainClient;
+WiFiClientSecure tlsClient;   // encrypted; the server's certificate is not checked (setInsecure)
+HTTPClient api;
+
 // Returns the HTTP status (or a negative error); the answer body goes in `body`.
 int serverRequest(const char *method, const char *path, const String &payload, String &body,
                   unsigned long timeoutMs) {
   if (WiFi.status() != WL_CONNECTED) return -100;
-  HTTPClient http;
-  http.setConnectTimeout(timeoutMs);
-  http.setTimeout(timeoutMs);
-  if (!http.begin(String(SERVER_URL) + path)) return -101;
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Terminal ") + TERMINAL_TOKEN);  // identifies this vehicle
-  int code = strcmp(method, "GET") == 0 ? http.GET() : http.POST(payload);
-  body = code > 0 ? http.getString() : "";
-  http.end();
+  api.setReuse(true);
+  api.setConnectTimeout(timeoutMs);
+  api.setTimeout(timeoutMs);
+  String url = String(SERVER_URL) + path;
+  if (!(SECURE_SERVER ? api.begin(tlsClient, url) : api.begin(plainClient, url))) return -101;
+  api.addHeader("Content-Type", "application/json");
+  api.addHeader("Authorization", String("Terminal ") + TERMINAL_TOKEN);  // identifies this vehicle
+  int code = strcmp(method, "GET") == 0 ? api.GET() : api.POST(payload);
+  body = code > 0 ? api.getString() : "";
+  api.end();   // keeps the connection open for the next request
+  if (code < 0) {   // broken connection: start a fresh one next time
+    tlsClient.stop();
+    plainClient.stop();
+  }
   if (code == 401 || code == 403) Serial.println("Server refused the terminal token: check TERMINAL_TOKEN in secrets.h");
   return code;
 }
@@ -476,7 +495,7 @@ void markServer(bool ok) {
 
 void fetchStatus() {
   String body;
-  int code = serverRequest("GET", "/api/status/", "", body, 1500);
+  int code = serverRequest("GET", "/api/status/", "", body, POLL_TIMEOUT_MS);
   if (code == 200) {
     long fare = jsonNumber(body, "fare", 0);
     if (fare > 0 && fare <= MAX_BALANCE) serverFare = fare;
@@ -512,7 +531,7 @@ bool syncQueue() {
     if (f) f.close();
     json += "]}";
     String body;
-    int code = serverRequest("POST", "/api/terminal/sync/", json, body, 5000);
+    int code = serverRequest("POST", "/api/terminal/sync/", json, body, BULK_TIMEOUT_MS);
     if (code != 200) {
       Serial.printf("Sync: failed (%d), kept for later. %s\n", code, body.substring(0, 120).c_str());
       return false;
@@ -538,8 +557,8 @@ bool syncQueue() {
 bool fetchCards() {
   if (WiFi.status() != WL_CONNECTED || queuedCount() > 0 || tripOffset > 0) return false;
   HTTPClient http;
-  http.setConnectTimeout(3000);
-  http.setTimeout(3000);
+  http.setConnectTimeout(BULK_TIMEOUT_MS);
+  http.setTimeout(BULK_TIMEOUT_MS);
   http.setReuse(false);   // one request, then the connection closes
   if (!http.begin(String(SERVER_URL) + "/api/terminal/cards/")) return false;
   http.addHeader("Authorization", String("Terminal ") + TERMINAL_TOKEN);
@@ -610,7 +629,7 @@ void handleLine(char *line);  // below
 // Ask the server for waiting messages: {"lines": ["MSG Top-up +100|Bal: KSh 600", "FARE 70"]}
 void pollServer() {
   String body;
-  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, serverOnline ? 1500 : 800);
+  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, serverOnline ? POLL_TIMEOUT_MS : PROBE_TIMEOUT_MS);
   bool wasOnline = serverOnline;
   markServer(code == 200);
   if (code != 200) {
@@ -918,6 +937,7 @@ void setup() {
   uint8_t v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   readerOk = !(v == 0x00 || v == 0xFF);
 
+  tlsClient.setInsecure();
   store.begin("fare", false);
   loadState();
 
