@@ -516,6 +516,23 @@ arduino --upload --port /dev/ttyUSB0 --board esp32:esp32:esp32:UploadSpeed=92160
 Serial Monitor: **115200** baud. Commands: `status`, `list`, `trip`, a card ID to
 simulate a tap, `help`.
 
+### Payment sounds
+Each result plays its own tune on the piezo. The tunes sit in one table near the
+top of `terminal_esp32.ino` (section **Sounds**), as `{frequency Hz, length ms}`
+notes, with `0` meaning a pause. Edit them, upload, and try each one from the Serial
+Monitor with `sound paid`, `sound low` or `sound all` (no card needed).
+
+| Sound | When | Default tune |
+|---|---|---|
+| `paid` | payment went through | rising chime C-E-G |
+| `repeat` | already paid this trip | two beeps |
+| `low` | failed: balance too low | falling "uh-oh" + long low tone |
+| `unknown` | failed: card not registered or deactivated | triple low buzz |
+| `topup` | a top-up message arrives from the server | quick rising run |
+| `startup` | terminal ready after switch-on | two-note chirp |
+
+`SOUND_ON = false` mutes the terminal (LED and LCD still work).
+
 ### What it does
 | Situation | LCD | Behaviour |
 |---|---|---|

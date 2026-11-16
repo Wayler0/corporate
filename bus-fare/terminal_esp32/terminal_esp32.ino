@@ -27,6 +27,7 @@
 //
 // Serial Monitor: 115200 baud, line ending "Newline". Type "help" for commands.
 // LED: GREEN = paid  RED = refused  YELLOW = already paid this trip  BLUE = asking the server
+// Sounds: each result has its own tune - edit them under "Sounds" below.
 
 #include <SPI.h>
 #include <Wire.h>
@@ -42,6 +43,55 @@ const int LCD_SDA = 21, LCD_SCL = 22;
 const int LED_R = 25, LED_G = 26, LED_B = 27;
 const int PIEZO = 13;
 const int PIEZO_CH = 0;  // ledc channel for the piezo
+
+// ---------- Sounds: EDIT HERE to customise the payment sounds ----------
+// Each sound is a list of {frequency in Hz, length in ms}. Frequency 0 = silence.
+// Piezos are loudest around 2000-4000 Hz, so keep tunes in octaves 6-7.
+// Try a sound without tapping a card: type "sound paid" (or "sound all") in
+// the Serial Monitor. Set SOUND_ON to false to silence the terminal.
+const bool SOUND_ON = true;
+const uint16_t NOTE_GAP_MS = 15;  // short silence after every note so repeats are heard apart
+
+const uint16_t REST = 0;
+const uint16_t C6 = 1047, D6 = 1175, E6 = 1319, F6 = 1397, G6 = 1568, A6 = 1760, B6 = 1976;
+const uint16_t C7 = 2093, D7 = 2349, E7 = 2637, F7 = 2794, G7 = 3136, A7 = 3520;
+const uint16_t C8 = 4186;
+
+struct Note {
+  uint16_t freq;
+  uint16_t ms;
+};
+
+// Payment went through: bright rising chime
+const Note SOUND_PAID[]    = {{C7, 80}, {E7, 80}, {G7, 160}};
+// Card already paid on this trip: two neutral beeps
+const Note SOUND_REPEAT[]  = {{A6, 90}, {REST, 60}, {A6, 90}};
+// Payment failed - not enough balance: falling "uh-oh" then a long low tone
+const Note SOUND_LOW[]     = {{E7, 120}, {C7, 120}, {REST, 60}, {G6, 400}};
+// Payment failed - card not registered / deactivated: harsh triple buzz
+const Note SOUND_UNKNOWN[] = {{D6, 100}, {REST, 50}, {D6, 100}, {REST, 50}, {D6, 300}};
+// Top-up arrived from the server
+const Note SOUND_TOPUP[]   = {{G6, 70}, {C7, 70}, {E7, 70}, {G7, 70}, {C8, 150}};
+// Terminal switched on and ready
+const Note SOUND_STARTUP[] = {{C7, 60}, {G7, 120}};
+
+struct Sound {
+  const char *name;  // used by the "sound <name>" command
+  const Note *notes;
+  uint8_t count;
+};
+#define SOUND(name, notes) {name, notes, sizeof(notes) / sizeof(notes[0])}
+const Sound SOUNDS[] = {
+  SOUND("paid", SOUND_PAID),
+  SOUND("repeat", SOUND_REPEAT),
+  SOUND("low", SOUND_LOW),
+  SOUND("unknown", SOUND_UNKNOWN),
+  SOUND("topup", SOUND_TOPUP),
+  SOUND("startup", SOUND_STARTUP),
+};
+enum SoundId { SND_PAID, SND_REPEAT, SND_LOW, SND_UNKNOWN, SND_TOPUP, SND_STARTUP };
+const uint8_t SOUND_COUNT = sizeof(SOUNDS) / sizeof(SOUNDS[0]);
+static_assert(SOUND_COUNT == SND_STARTUP + 1, "SOUNDS and SoundId must list the same sounds in the same order");
 
 // ---------- Routes (used offline; the server's fare wins when connected) ----------
 struct Route {
@@ -146,19 +196,21 @@ void lcdMessage(const String &l1, const String &l2) {
 void setColor(bool r, bool g, bool b) {
   digitalWrite(LED_R, r); digitalWrite(LED_G, g); digitalWrite(LED_B, b);
 }
-void beep(int freq, int ms) { ledcWriteTone(PIEZO_CH, freq); delay(ms); ledcWriteTone(PIEZO_CH, 0); }
-void flash(bool r, bool g, bool b) {
-  // Same sounds as the Uno: 1 beep paid, 2 beeps already paid, 3 short + 1 long refused
+void playSound(SoundId id) {
+  if (!SOUND_ON) return;
+  const Sound &s = SOUNDS[id];
+  for (uint8_t i = 0; i < s.count; i++) {
+    ledcWriteTone(PIEZO_CH, s.notes[i].freq);
+    delay(s.notes[i].ms);
+    ledcWriteTone(PIEZO_CH, 0);
+    if (s.notes[i].freq) delay(NOTE_GAP_MS);
+  }
+}
+// LED colour + sound together, LED stays on for at least LED_MS
+void flash(bool r, bool g, bool b, SoundId sound) {
   setColor(r, g, b);
   unsigned long start = millis();
-  if (g && !r) {
-    beep(3000, 200);
-  } else if (r && g) {
-    beep(2700, 90); delay(70); beep(2700, 90);
-  } else if (r) {
-    for (int i = 0; i < 3; i++) { beep(2700, 80); delay(60); }
-    beep(2700, 400);
-  }
+  playSound(sound);
   unsigned long used = millis() - start;
   if (used < LED_MS) delay(LED_MS - used);
   setColor(false, false, false);
@@ -334,17 +386,17 @@ void showServerResult(const char *uid, const String &result, long fare, long bal
   if (result == "PAID") {
     if (p >= 0) markPaid(p);
     lcdMessage(String("PAID KSh ") + fare, String("Bal: KSh ") + balance);
-    flash(false, true, false);
+    flash(false, true, false, SND_PAID);
   } else if (result == "REPEAT") {
     if (p >= 0) markPaid(p);
     lcdMessage("Already paid", String("Bal: KSh ") + balance);
-    flash(true, true, false);
+    flash(true, true, false, SND_REPEAT);
   } else if (result == "LOW") {
     lcdMessage("Low balance", String("Has ") + balance + " need " + fare);
-    flash(true, false, false);
+    flash(true, false, false, SND_LOW);
   } else {
     lcdMessage("Unknown card", "See conductor");
-    flash(true, false, false);
+    flash(true, false, false, SND_UNKNOWN);
   }
 }
 
@@ -374,20 +426,20 @@ void offlineTap(const char *uid) {
   if (p < 0) {
     Serial.println("OFFLINE: unknown card");
     lcdMessage("Unknown card", "See conductor");
-    flash(true, false, false);
+    flash(true, false, false, SND_UNKNOWN);
     return;
   }
   Serial.printf("OFFLINE: %s\n", PASSENGERS[p].name);
   if (hasPaid(p)) {
     Serial.println("  already paid this trip");
     lcdMessage("Already paid", String("Bal: KSh ") + balances[p]);
-    flash(true, true, false);
+    flash(true, true, false, SND_REPEAT);
     return;
   }
   if (balances[p] < fare) {
     Serial.printf("  low balance: has %u, needs %u\n", balances[p], fare);
     lcdMessage("Low balance", String("Has ") + balances[p] + " need " + fare);
-    flash(true, false, false);
+    flash(true, false, false, SND_LOW);
     return;
   }
   balances[p] -= fare;
@@ -395,7 +447,7 @@ void offlineTap(const char *uid) {
   markPaid(p);
   Serial.printf("  PAID KSh %u, balance KSh %u\n", fare, balances[p]);
   lcdMessage(String("PAID KSh ") + fare, String("Bal: KSh ") + balances[p]);
-  flash(false, true, false);
+  flash(false, true, false, SND_PAID);
 }
 
 void handleTap(const char *uid) {
@@ -419,6 +471,24 @@ void printStatus() {
   Serial.printf("Route: %s  |  Fare: KSh %u\n", routeName().c_str(), currentFare());
 }
 
+// "sound paid" plays one sound, "sound all" plays every sound, "sound" lists them
+void testSound(const char *arg) {
+  while (*arg == ' ') arg++;
+  for (uint8_t i = 0; i < SOUND_COUNT; i++) {
+    if (*arg == '\0') { Serial.printf("  sound %s\n", SOUNDS[i].name); continue; }
+    bool all = strcasecmp(arg, "all") == 0;
+    if (all || strcasecmp(arg, SOUNDS[i].name) == 0) {
+      Serial.printf("Playing: %s\n", SOUNDS[i].name);
+      playSound((SoundId)i);
+      if (!all) return;
+      delay(600);
+    }
+  }
+  if (*arg == '\0') Serial.println("  sound all");
+  else if (strcasecmp(arg, "all") != 0) Serial.println("No such sound. Type: sound");
+  if (!SOUND_ON) Serial.println("(SOUND_ON is false: the terminal is muted)");
+}
+
 void handleLine(char *line) {
   while (*line == ' ') line++;
   if (*line == '\0') return;
@@ -427,6 +497,7 @@ void handleLine(char *line) {
     char *second = strchr(line + 4, '|');
     if (second) *second++ = '\0';
     lcdMessage(line + 4, second ? second : "");
+    if (strncasecmp(line + 4, "Top-up", 6) == 0) playSound(SND_TOPUP);
   } else if (strncasecmp(line, "fare ", 5) == 0) {
     long f = atol(line + 5);
     if (f > 0 && f <= MAX_BALANCE) {
@@ -437,7 +508,9 @@ void handleLine(char *line) {
   } else if (strcasecmp(line, "trip") == 0) {
     newTrip();
   } else if (strcasecmp(line, "help") == 0) {
-    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          passengers and offline balances\n  status        Wi-Fi and server\n  route <n>     switch route offline (starts a new trip)\n  trip          new trip\n  reset         restore start balances (offline copy)");
+    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          passengers and offline balances\n  status        Wi-Fi and server\n  route <n>     switch route offline (starts a new trip)\n  trip          new trip\n  sound [name]  play a payment sound (sound all = every one)\n  reset         restore start balances (offline copy)");
+  } else if (strncasecmp(line, "sound", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+    testSound(line + 5);
   } else if (strcasecmp(line, "list") == 0) {
     listPassengers();
   } else if (strcasecmp(line, "status") == 0) {
@@ -549,6 +622,7 @@ void setup() {
   pollServer();
   printStatus();
   lcdIdle();
+  playSound(SND_STARTUP);
   Serial.println("READY. Type 'help' for commands.");
 }
 
