@@ -26,7 +26,7 @@ from .serializers import (
 )
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
-    create_employee, get_current_trip, process_tap, reset_password, settlements_total,
+    block_card, create_employee, get_current_trip, process_tap, reset_password, settlements_total,
     start_new_trip, tap_totals, terminal_status, top_up, trip_stats,
 )
 
@@ -300,6 +300,7 @@ class EmployeeListView(CompanyView):
         serializer.is_valid(raise_exception=True)
         data = dict(serializer.validated_data)
         data.pop('active', None)
+        data.pop('card_blocked', None)
         try:
             passenger, password = create_employee(self.company, **data)
         except NotAllowedError as error:
@@ -363,6 +364,7 @@ def account(passenger):
         'department': passenger.department,
         'card_uid': passenger.card_uid,
         'active': passenger.active,
+        'card_blocked_at': passenger.card_blocked_at,
         'balance': passenger.balance,
         'company': company.name if company else None,
         'company_pays': bool(company and company.company_pays),
@@ -392,6 +394,17 @@ class MyTopUpView(EmployeeView):
             passenger = top_up(passenger, serializer.validated_data['amount'], passenger.payment_method)
         except (AmountError, NotAllowedError) as error:
             return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(account(passenger))
+
+
+class MyCardBlockView(EmployeeView):
+    """POST /api/me/card/block/ -> the account. Lost or stolen card: it is declined
+    on every vehicle from now on. The login keeps working. Only the company admin
+    can unblock it or give a new card (the card may have been copied meanwhile)."""
+
+    def post(self, request):
+        passenger = self.passenger
+        block_card(passenger)
         return Response(account(passenger))
 
 

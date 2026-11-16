@@ -30,5 +30,6 @@ urlpatterns = [
     # Employee: their own account
     path('me/', views.MyAccountView.as_view(), name='my-account'),
     path('me/topup/', views.MyTopUpView.as_view(), name='my-topup'),
+    path('me/card/block/', views.MyCardBlockView.as_view(), name='my-card-block'),
     path('me/payment-method/', views.MyPaymentMethodView.as_view(), name='my-payment-method'),
 ]

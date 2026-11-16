@@ -36,7 +36,7 @@ export function TabBar({ path, tabs }) {
 }
 
 // What a tap means, in words. The crew reads "Declined" as: collect cash.
-const RESULT_LABEL = { PAID: 'PAID', REPEAT: 'ALREADY PAID', LOW: 'DECLINED', UNKNOWN: 'DECLINED', TOPUP: 'TOP-UP' }
+const RESULT_LABEL = { PAID: 'PAID', REPEAT: 'ALREADY PAID', LOW: 'DECLINED', UNKNOWN: 'DECLINED', BLOCKED: 'LOST CARD', TOPUP: 'TOP-UP' }
 
 export function ResultBadge({ result }) {
   return <span className={`badge badge-${result.toLowerCase()}`}>{RESULT_LABEL[result] || result}</span>

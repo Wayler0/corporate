@@ -146,6 +146,7 @@ a { color: var(--accent); }
 .badge-repeat { color: var(--repeat); background: var(--repeat-bg); }
 .badge-low { color: var(--refused); background: var(--refused-bg); }
 .badge-unknown { color: var(--unknown); background: var(--unknown-bg); }
+.badge-blocked { color: var(--refused); background: var(--refused-bg); }
 .badge-topup { color: var(--accent); background: var(--accent-soft); }
 .small-badge { min-width: 0; padding: 2px 6px; border-radius: 6px; }
 

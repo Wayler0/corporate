@@ -3,7 +3,7 @@ import { api, paymentLabel } from '../../api.js'
 import { useAuth } from '../../auth.jsx'
 import { usePoll } from '../../usePoll.js'
 import { clock, localPhone, money, shortDate } from '../../format.js'
-import { Icon, Message, PageState, ResultBadge, ServerProblem } from '../../components/ui.jsx'
+import { Banner, Icon, Message, PageState, ResultBadge, ServerProblem } from '../../components/ui.jsx'
 
 export function TempPassword({ phone, password }) {
   return (
@@ -65,11 +65,22 @@ export default function EmployeeDetail({ id }) {
       (r) => setMessage({ tone: 'ok', text: r.active ? 'Reactivated.' : 'Deactivated.' }))
   }
 
+  const toggleCard = () => {
+    const text = e.card_blocked_at
+      ? `Unblock card ${e.card_uid}? Only do this if ${e.name} has the card back. `
+        + 'If it may have been copied, give them a new card instead (Edit, then a new card ID).'
+      : `Block card ${e.card_uid}? It is declined on every bus. ${e.name} can still log in.`
+    if (!window.confirm(text)) return
+    act(() => api.updateEmployee(id, { card_blocked: !e.card_blocked_at }),
+      (r) => setMessage({ tone: 'ok', text: r.card_blocked_at ? 'Card blocked.' : 'Card unblocked.' }))
+  }
+
   const rows = [
     ['Staff number', e.staff_number],
     ['Department', e.department || '—'],
     ['Phone', localPhone(e.phone)],
     ['Card', <span key="c" className="mono">{e.card_uid}</span>],
+    ['Card status', e.card_blocked_at ? `Blocked ${shortDate(e.card_blocked_at)} (lost or stolen)` : 'Working'],
     ['Pays with', e.payment_method ? `${paymentLabel(e.payment_method)} · ${e.payment_method === 'CARD' ? '•••• ' + e.payment_account : localPhone(e.payment_account)}` : 'Not set'],
     ['Status', e.active ? 'Active' : 'Deactivated'],
   ]
@@ -81,6 +92,12 @@ export default function EmployeeDetail({ id }) {
         <ServerProblem poll={poll} />
         <Message message={message} />
         {tempPassword && <TempPassword phone={e.phone} password={tempPassword} />}
+        {e.card_blocked_at && (
+          <Banner tone="error">
+            Card reported lost on {shortDate(e.card_blocked_at)}. Give {e.name} a new card with Edit
+            (the new card ID replaces the lost one), or unblock it if they found it.
+          </Banner>
+        )}
 
         {employeesPay && (
           <section className="balance-card">
@@ -97,6 +114,9 @@ export default function EmployeeDetail({ id }) {
 
         <div className="actions">
           <button type="button" className="btn secondary" disabled={busy} onClick={resetPassword}>Reset password</button>
+          <button type="button" className={e.card_blocked_at ? 'btn secondary' : 'btn danger'} disabled={busy} onClick={toggleCard}>
+            {e.card_blocked_at ? 'Unblock card' : 'Block card'}
+          </button>
           <button type="button" className={e.active ? 'btn danger' : 'btn secondary'} disabled={busy} onClick={toggleActive}>
             {e.active ? 'Deactivate' : 'Reactivate'}
           </button>

@@ -8,7 +8,7 @@ import { useAuth } from '../../auth.jsx'
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
   { id: 'paid', label: 'Paid', test: (t) => t.result === 'PAID' },
-  { id: 'declined', label: 'Declined', test: (t) => t.result === 'LOW' || t.result === 'UNKNOWN' },
+  { id: 'declined', label: 'Declined', test: (t) => t.result === 'LOW' || t.result === 'UNKNOWN' || t.result === 'BLOCKED' },
 ]
 
 export default function Live() {

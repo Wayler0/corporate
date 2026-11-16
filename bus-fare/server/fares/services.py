@@ -26,7 +26,7 @@ class NotAllowedError(Exception):
 
 @dataclass
 class TapDecision:
-    result: str   # PAID, REPEAT, LOW or UNKNOWN
+    result: str   # PAID, REPEAT, LOW, UNKNOWN or BLOCKED
     fare: int
     balance: int
 
@@ -106,7 +106,8 @@ def company_outstanding(company):
 @transaction.atomic
 def process_tap(vehicle, card_uid):
     """Approve or refuse one tap on one vehicle, and record it. Checked in this order:
-    UNKNOWN (or deactivated) card -> REPEAT (already paid this trip) -> LOW -> PAID.
+    UNKNOWN (or deactivated) card -> BLOCKED (reported lost) -> REPEAT (already paid
+    this trip) -> LOW -> PAID.
     LOW means: not enough on the card, or (company pays) over the company's credit limit."""
     card_uid = normalize_card_uid(card_uid)
     trip = get_current_trip(vehicle)
@@ -125,6 +126,10 @@ def process_tap(vehicle, card_uid):
                  .filter(card_uid=card_uid).first())
     if passenger is None or not passenger.active:
         return record(Transaction.Result.UNKNOWN, passenger)
+    if passenger.card_blocked_at is not None:
+        # Recorded, so the employee and their company see that someone tried the
+        # lost card. The balance is not shown to whoever is holding it.
+        return record(Transaction.Result.BLOCKED, passenger)
 
     already_paid = Transaction.objects.filter(
         trip=trip, passenger=passenger, result=Transaction.Result.PAID).exists()
@@ -175,6 +180,17 @@ def terminal_status(vehicle):
     return {'online': online, 'last_seen': last}
 
 
+# ---------- Lost cards ----------
+@transaction.atomic
+def block_card(passenger):
+    """Stop this card working on every vehicle, straight away. Only the card:
+    the employee can still log in. Blocking twice keeps the first time."""
+    updated = Passenger.objects.filter(pk=passenger.pk, card_blocked_at__isnull=True).update(
+        card_blocked_at=timezone.now())
+    passenger.refresh_from_db(fields=['card_blocked_at'])
+    return updated == 1
+
+
 # ---------- Top-up (employee pays billing) ----------
 @transaction.atomic
 def top_up(passenger, amount, method):
@@ -204,7 +220,7 @@ def tap_totals(taps):
         collected=models.Sum('amount', filter=models.Q(result=R.PAID), default=0),
         paid=models.Count('id', filter=models.Q(result=R.PAID)),
         repeat=models.Count('id', filter=models.Q(result=R.REPEAT)),
-        refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN])),
+        refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN, R.BLOCKED])),
     )
 
 

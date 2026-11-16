@@ -379,7 +379,8 @@ void pollServer() {
 // mode carries on from the same balances if the server goes away.
 void showServerResult(const char *uid, const String &result, long fare, long balance) {
   int p = findPassenger(uid);
-  if (p >= 0 && balance >= 0 && balance <= MAX_BALANCE && result != "UNKNOWN") {
+  // UNKNOWN and BLOCKED answers carry no real balance (0), so keep our copy
+  if (p >= 0 && balance >= 0 && balance <= MAX_BALANCE && result != "UNKNOWN" && result != "BLOCKED") {
     balances[p] = balance;
     saveBalances();
   }
@@ -395,6 +396,10 @@ void showServerResult(const char *uid, const String &result, long fare, long bal
   } else if (result == "LOW") {
     lcdMessage("Low balance", String("Has ") + balance + " need " + fare);
     flash(true, false, false, SND_LOW);
+  } else if (result == "BLOCKED") {
+    // The owner reported this card lost or stolen
+    lcdMessage("Card blocked", "Reported lost");
+    flash(true, false, false, SND_UNKNOWN);
   } else {
     lcdMessage("Unknown card", "See conductor");
     flash(true, false, false, SND_UNKNOWN);

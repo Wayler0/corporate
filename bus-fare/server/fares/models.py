@@ -86,6 +86,10 @@ class Passenger(models.Model):
     payment_account = models.CharField(
         max_length=40, blank=True, help_text='M-Pesa / Airtel number, or the last 4 digits of a bank card')
     active = models.BooleanField(default=True, help_text='A deactivated card is declined at the terminal')
+    card_blocked_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the card was reported lost or stolen. A blocked card is declined at the terminal; '
+                  'the login keeps working. Cleared when the company admin unblocks it or gives a new card.')
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='passenger')
     created_at = models.DateTimeField(auto_now_add=True, null=True)
@@ -154,6 +158,7 @@ class Transaction(models.Model):
         REPEAT = 'REPEAT', 'Already paid this trip'
         LOW = 'LOW', 'Low balance / over credit limit'
         UNKNOWN = 'UNKNOWN', 'Unknown or deactivated card'
+        BLOCKED = 'BLOCKED', 'Card reported lost or stolen'
         TOPUP = 'TOPUP', 'Top-up'
 
     class PaidBy(models.TextChoices):

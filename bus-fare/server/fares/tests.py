@@ -353,3 +353,72 @@ class EmployeeTests(Base):
         self.tap('008DEC53')
         data = self.person('0700000001').get('/api/me/').json()
         self.assertEqual(data['transactions'], [])
+
+
+class LostCardTests(Base):
+    """An employee blocks their own lost card; only the company admin brings it back."""
+
+    def block(self, username='0700000001'):
+        return self.person(username).post('/api/me/card/block/')
+
+    def test_employee_blocks_own_card(self):
+        response = self.block()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()['card_blocked_at'])
+        # Declined on every vehicle, no fare taken, balance not shown to whoever holds it
+        self.assertEqual(self.tap('E5734107').json(), {'result': 'BLOCKED', 'fare': 50, 'balance': 0})
+        self.assertEqual(self.tap('E5734107', BUS2).json()['result'], 'BLOCKED')
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 500)
+
+    def test_login_keeps_working_and_attempts_are_visible(self):
+        self.block()
+        self.tap('E5734107')
+        me = self.person('0700000001').get('/api/me/').json()
+        self.assertEqual(me['transactions'][0]['result'], 'BLOCKED')
+        self.assertEqual(self.person('staffadmin').get('/api/company/').json()['month']['declined'], 1)
+
+    def test_blocking_twice_keeps_the_first_time(self):
+        first = self.block().json()['card_blocked_at']
+        self.assertEqual(self.block().json()['card_blocked_at'], first)
+
+    def test_blocks_only_their_own_card(self):
+        self.block('0700000001')
+        self.assertEqual(self.tap('008DEC53').json()['result'], 'PAID')
+
+    def test_others_cannot_use_the_endpoint(self):
+        self.assertEqual(APIClient().post('/api/me/card/block/').status_code, 403)
+        self.assertEqual(self.person('staffadmin').post('/api/me/card/block/').status_code, 403)
+        self.assertEqual(self.person('crew1').post('/api/me/card/block/').status_code, 403)
+
+    def test_employee_cannot_unblock_through_their_account(self):
+        self.block()
+        me = self.person('0700000001')
+        self.assertEqual(me.patch('/api/me/', {'card_blocked_at': None}, format='json').status_code, 405)
+        self.assertEqual(self.tap('E5734107').json()['result'], 'BLOCKED')
+
+    def test_admin_unblocks(self):
+        self.block()
+        white = Passenger.objects.get(card_uid='E5734107')
+        data = self.person('staffadmin').patch(
+            f'/api/company/employees/{white.pk}/', {'card_blocked': False}, format='json').json()
+        self.assertIsNone(data['card_blocked_at'])
+        self.assertEqual(self.tap('E5734107').json()['result'], 'PAID')
+
+    def test_new_card_replaces_the_lost_one(self):
+        self.block()
+        white = Passenger.objects.get(card_uid='E5734107')
+        self.person('staffadmin').patch(
+            f'/api/company/employees/{white.pk}/', {'card_uid': 'AABBCCDD'}, format='json')
+        self.assertEqual(self.tap('AABBCCDD').json(), {'result': 'PAID', 'fare': 50, 'balance': 450})
+        self.assertEqual(self.tap('E5734107').json()['result'], 'UNKNOWN')   # the lost card is nobody's now
+
+    def test_admin_can_block_too(self):
+        white = Passenger.objects.get(card_uid='E5734107')
+        self.person('staffadmin').patch(f'/api/company/employees/{white.pk}/', {'card_blocked': True}, format='json')
+        self.assertEqual(self.tap('E5734107').json()['result'], 'BLOCKED')
+
+    def test_admin_of_another_company_cannot_touch_it(self):
+        kim = Passenger.objects.get(card_uid='A1B2C3D4')
+        response = self.person('staffadmin').patch(
+            f'/api/company/employees/{kim.pk}/', {'card_blocked': True}, format='json')
+        self.assertEqual(response.status_code, 404)
