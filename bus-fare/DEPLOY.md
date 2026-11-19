@@ -60,6 +60,8 @@ Deployed 16 Nov 2026 from branch `kim`.
 | `DEMO_TERMINAL_TOKEN_BUS1` / `_BUS2` | random | Terminal tokens of KDA 001A / KDB 002B; goes in the ESP32's `secrets.h` |
 | `DJANGO_SUPERUSER_USERNAME` / `_PASSWORD` | `platform` / random | Login for `/admin/` |
 | `ALLOWED_HOSTS` | optional | Extra addresses, e.g. a custom domain |
+| `DEMO_TOPUP` | unset (or `1` for a demo) | Top-up adds money with no payment provider, so in production it is **off** unless this is `1`. Turn it off again after a demo |
+| `LOGIN_RATE` | optional, default `10/min` | Login attempts allowed per address |
 
 Railway sets `PORT` and `RAILWAY_PUBLIC_DOMAIN` itself; the server adds that
 domain to `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`.
@@ -162,6 +164,7 @@ docker run --rm -p 8000:8000 -e PORT=8000 -e DJANGO_DEBUG=0 -e DJANGO_SECRET_KEY
   in the Railway dashboard when the demo is over.
 - **Backups:** the Postgres data lives on a Railway volume. Railway's dashboard can
   take backups; there are none yet.
-- **Top-ups are still simulated** (no M-Pesa): anyone with an employee login can add
-  balance. Fine for a demo, not for real money.
+- **Top-ups are still simulated** (no M-Pesa): with `DEMO_TOPUP=1` anyone with an
+  employee login can add balance. Without it, production refuses top-ups and the
+  wallet says top-up is not available yet.
 - The laptop set-up still works unchanged (`DASHBOARDS.md`, `dashboard/README.md`).
