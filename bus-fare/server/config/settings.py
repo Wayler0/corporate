@@ -161,7 +161,16 @@ if DASHBOARD_DIR:
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    # Login attempts per address (LoginView): slows down password guessing
+    "DEFAULT_THROTTLE_RATES": {"login": os.environ.get("LOGIN_RATE", "10/min")},
+    # Behind Railway's proxy the client is the last address in X-Forwarded-For;
+    # without this a client could send a new made-up address with every attempt
+    "NUM_PROXIES": None if DEBUG else 1,
 }
+
+# Top-up is not connected to a payment provider yet, so a top-up adds money for
+# free. On by default on the laptop; off in production unless DEMO_TOPUP=1.
+DEMO_TOPUP = os.environ.get('DEMO_TOPUP', '1' if DEBUG else '0') == '1'
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 14   # stay logged in for two weeks
 
 # Errors go to the console, so they show up in Railway's logs (with debug off,

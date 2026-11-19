@@ -6,6 +6,7 @@
   company        a company admin: their own company only
   me             an employee: their own account only
 """
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.http import HttpResponse
 from django.db import transaction as db_transaction
@@ -16,6 +17,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import permissions, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Passenger, Profile, Route, Transaction, Trip
@@ -175,6 +177,8 @@ class MeView(APIView):
 class LoginView(APIView):
     """POST /api/auth/login/ {"username": "0712345678", "password": "..."}"""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'   # rate in settings.REST_FRAMEWORK
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -412,6 +416,7 @@ def account(passenger):
         'balance': passenger.balance,
         'company': company.name if company else None,
         'company_pays': bool(company and company.company_pays),
+        'topup_enabled': settings.DEMO_TOPUP,
         'payment_method': passenger.payment_method,
         'payment_account': passenger.payment_account,
         'month': {'spent': sum(month.values_list('amount', flat=True)), 'trips': month.count()},

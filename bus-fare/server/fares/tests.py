@@ -2,6 +2,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import override_settings
@@ -20,6 +21,7 @@ BUS2 = 'demo-terminal-bus-2'
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
 class Base(APITestCase):
     def setUp(self):
+        cache.clear()   # login throttle counts
         call_command('seed_demo', verbosity=0)
         self.bus1 = Vehicle.objects.get(registration='KDA 001A')
         self.bus2 = Vehicle.objects.get(registration='KDB 002B')
@@ -336,6 +338,14 @@ class EmployeeTests(Base):
         for amount in (0, -5, 'abc', 49501):
             self.assertEqual(me.post('/api/me/topup/', {'amount': amount}, format='json').status_code, 400, amount)
 
+    @override_settings(DEMO_TOPUP=False)
+    def test_no_top_up_without_demo_flag(self):
+        me = self.person('0700000003')
+        self.assertFalse(me.get('/api/me/').json()['topup_enabled'])
+        response = me.post('/api/me/topup/', {'amount': 100}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Passenger.objects.get(card_uid='11223344').balance, 30)
+
     def test_no_top_up_when_company_pays(self):
         response = self.person('0700000004').post('/api/me/topup/', {'amount': 100}, format='json')
         self.assertEqual(response.status_code, 400)
@@ -545,6 +555,10 @@ class OfflineModeTests(Base):
         self.assertEqual(response.json()['trip'], newer)        # the server's trip wins
         self.assertEqual(Transaction.objects.get(offline=True).result, 'PAID')
 
+    def test_sync_never_charges_more_than_the_route_fare(self):
+        self.sync([self.offline_tap(1, 'E5734107', fare=5000)])
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 450)
+
     def test_sync_is_per_vehicle(self):
         self.sync([self.offline_tap(1, 'E5734107')], token=BUS2, trip=0)
         t = Transaction.objects.get(offline=True)
@@ -556,3 +570,18 @@ class OfflineModeTests(Base):
         self.assertEqual(self.sync([self.offline_tap(1, 'E5734107', fare=0)]).status_code, 400)
         self.assertEqual(self.sync([self.offline_tap(i, 'E5734107') for i in range(101)]).status_code, 400)
         self.assertEqual(APIClient().post('/api/terminal/sync/', {}, format='json').status_code, 401)
+
+
+class SafetyTests(Base):
+    def test_login_is_rate_limited(self):
+        client = APIClient()
+        codes = [client.post('/api/auth/login/', {'username': '0700000001', 'password': 'wrong'},
+                             format='json').status_code for _ in range(11)]
+        self.assertEqual(codes[:10], [400] * 10)
+        self.assertEqual(codes[10], 429)
+
+    def test_a_vehicle_without_a_running_trip_keeps_its_last_route(self):
+        marimanti = Route.objects.get(name='Marimanti-Meru')
+        self.person('crew1').post('/api/operator/trip/', {'route': marimanti.pk}, format='json')
+        Trip.objects.filter(vehicle=self.bus1).update(ended_at=timezone.now())
+        self.assertEqual(self.tap('E5734107').json()['fare'], marimanti.fare)

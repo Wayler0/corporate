@@ -4,6 +4,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import models, transaction
 from django.utils import timezone
@@ -59,7 +60,10 @@ def get_current_trip(vehicle):
     trip = running_trip(vehicle)
     if trip:
         return trip
-    route = Route.objects.order_by('id').first()
+    # Carry on with the route this vehicle ran last; only a vehicle that has never
+    # run a trip starts on the first route (the crew changes it on the Trips screen)
+    last = Trip.objects.filter(vehicle=vehicle).select_related('route').order_by('-id').first()
+    route = last.route if last else Route.objects.order_by('id').first()
     if route is None:
         raise NoRouteError('Add a route first (python manage.py seed_demo).')
     return Trip.objects.create(vehicle=vehicle, route=route)
@@ -242,6 +246,9 @@ def sync_offline(vehicle, terminal_id, trip_id, trips_started, taps):
                 offline=True, terminal_ref=ref)
             Transaction.objects.filter(pk=t.pk).update(created_at=at)   # when it really happened
 
+        # Never charge more than the trip's route fare, whatever the terminal says
+        fare = min(tap['fare'], trip.route.fare)
+
         if passenger is None or not passenger.active:
             record(R.UNKNOWN)
         elif passenger.card_blocked_at is not None and passenger.card_blocked_at <= at:
@@ -249,10 +256,10 @@ def sync_offline(vehicle, terminal_id, trip_id, trips_started, taps):
         elif Transaction.objects.filter(trip=trip, passenger=passenger, result=R.PAID).exists():
             record(R.REPEAT, balance=passenger.balance)
         elif passenger.company is not None and passenger.company.company_pays:
-            record(R.PAID, amount=tap['fare'], balance=passenger.balance,
+            record(R.PAID, amount=fare, balance=passenger.balance,
                    paid_by=Transaction.PaidBy.COMPANY, company=passenger.company)
         else:
-            take = min(tap['fare'], passenger.balance)
+            take = min(fare, passenger.balance)
             passenger.balance -= take
             passenger.save(update_fields=['balance'])
             record(R.PAID, amount=take, balance=passenger.balance, paid_by=Transaction.PaidBy.CARD)
@@ -307,7 +314,10 @@ def block_card(passenger):
 @transaction.atomic
 def top_up(passenger, amount, method):
     """Add money to an employee's card. DEMO: no payment provider is connected
-    yet, so the payment always succeeds. Real M-Pesa goes here later."""
+    yet, so the payment always succeeds. Real M-Pesa goes here later. Until then
+    it only works where settings.DEMO_TOPUP is on (never by default in production)."""
+    if not settings.DEMO_TOPUP:
+        raise NotAllowedError('Top-up is not available yet: mobile money payments are coming.')
     passenger = Passenger.objects.select_for_update(of=('self',)).select_related('company').get(pk=passenger.pk)
     if passenger.company is not None and passenger.company.company_pays:
         raise NotAllowedError(f'{passenger.company.name} pays your fares, so there is nothing to top up.')
