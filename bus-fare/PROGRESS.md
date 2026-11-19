@@ -145,6 +145,16 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
 - Battery found: a LiPo pouch cell already soldered to a **TP4056** charger board
   ("03962A" is the board's code). Still needs a 5 V boost board (MT3608).
 
+### 15 Nov: Wi-Fi changed over the cable, no code
+- For the demo the Wi-Fi must be changeable without editing code. A dashboard
+  can't do it at a new venue (the terminal can't hear it until it is on the
+  network), so: **`tools/set_wifi.py`** sends the network name and password over
+  the USB cable (like adb); the ESP32 saves them in flash and reports
+  `WIFI OK`/`WIFI FAILED`. Server address and token change the same way.
+- Tested: wrong network → clear failure message; switch back → `WIFI OK`.
+- Found and fixed: opening the USB port could hold the ESP32 in reset; the
+  script now restarts it cleanly. Uploads at 921600 baud failed once; 115200 works.
+
 ### 16 Nov: Sounds, lost cards, offline mode, Railway
 - **Payment sounds:** one tune per result (paid, already paid, low balance, unknown,
   top-up, start-up) in one editable table; `sound all` plays them. The note names
@@ -167,6 +177,15 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
   the published defaults. The ESP32 now talks to Railway over HTTPS from the phone
   hotspot; reusing one connection cut a tap from 4–5 s to ~1.2 s.
 
+### 19 Nov: one terminal firmware again
+- Merged `main` (Kim's sounds, lost cards, offline sync, Railway/HTTPS) with the
+  `wayler` branch (Wi-Fi/server/token over the cable, scrolling LCD lines).
+  Kim's server code is the base; the server address and token now come from the
+  settings saved over the cable, and the HTTPS timeouts follow the saved address,
+  so `server https://...` switches between the laptop and Railway without a new upload.
+- Server lines still cannot change the Wi-Fi settings; `trip` from the dashboard
+  starts a server trip as before.
+
 ---
 
 ## Open items
@@ -186,4 +205,4 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
 | GSM antenna (IPEX/u.FL) | Kim asked | |
 | SIM card + separate 5V 2A supply for GSM | Later | Roadmap; SIM800 is 2G only |
 | Pin in PWX → Uno pin 4 (auto power-on for GSM) | Later | |
-| Competition date | Team | Not yet known |
+| Competition | Team | Machakos University hackfest; judging 19 Nov 2026 |

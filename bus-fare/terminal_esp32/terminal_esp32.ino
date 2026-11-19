@@ -14,6 +14,9 @@
 //     with POST /api/terminal/sync/ as soon as the server answers again, before
 //     anything else. Trips started offline ("trip", "route <n>") are sent too.
 //   * A '*' in the top right corner of the LCD means "connected to the server".
+//   * Wi-Fi, server address and token can be changed over the USB cable without
+//     uploading:  python3 tools/set_wifi.py "<network>" "<password>"
+//     (or type  wifi <name>|<password>  in the Serial Monitor). They are saved.
 //   * Every request carries  Authorization: Terminal <TERMINAL_TOKEN>  so the
 //     server knows which vehicle is calling (demo token: demo-terminal-bus-1).
 //
@@ -154,19 +157,20 @@ const uint8_t SYNC_BATCH = 50;    // taps per sync request (the server takes up 
 // ---------- Settings ----------
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
-const unsigned long LCD_MESSAGE_MS = 3000;
 // A server on the internet (https://..., e.g. Railway) needs an encrypted handshake
 // on every request and is further away than a laptop on the same Wi-Fi: wait longer.
-const bool SECURE_SERVER = strncmp(SERVER_URL, "https", 5) == 0;
-const unsigned long TAP_TIMEOUT_MS = SECURE_SERVER ? 6000 : 2000;     // server must answer a tap within this
-const unsigned long POLL_TIMEOUT_MS = SECURE_SERVER ? 5000 : 1500;    // a poll while online
-const unsigned long PROBE_TIMEOUT_MS = SECURE_SERVER ? 3000 : 800;    // a poll while offline (blocks taps meanwhile)
-const unsigned long BULK_TIMEOUT_MS = SECURE_SERVER ? 10000 : 5000;   // card list and sync
+// The server can be changed over the USB cable ("server <url>"), so this follows the
+// saved address (set in loadConfig() and by the server command), not secrets.h.
+bool SECURE_SERVER = false;
+#define TAP_TIMEOUT_MS    (SECURE_SERVER ? 6000UL : 3000UL)    // server must answer a tap within this
+#define POLL_TIMEOUT_MS   (SECURE_SERVER ? 5000UL : 1500UL)    // a poll while online
+#define PROBE_TIMEOUT_MS  (SECURE_SERVER ? 3000UL : 800UL)     // a poll while offline (blocks taps meanwhile)
+#define BULK_TIMEOUT_MS   (SECURE_SERVER ? 10000UL : 5000UL)   // card list and sync
 const unsigned long POLL_EVERY_MS = 2000;      // ask for messages this often when online
-const unsigned long RETRY_EVERY_MS = SECURE_SERVER ? 15000 : 5000;    // try to reach the server this often when offline
-const unsigned long ONLINE_TIMEOUT_MS = SECURE_SERVER ? 20000 : 8000; // no good answer for this long = offline
+#define RETRY_EVERY_MS    (SECURE_SERVER ? 15000UL : 5000UL)   // try to reach the server this often when offline
+#define ONLINE_TIMEOUT_MS (SECURE_SERVER ? 20000UL : 8000UL)   // no good answer for this long = offline
 const unsigned long CARDS_EVERY_MS = 30000;    // refresh the card list this often when online
-const uint8_t LINE_LEN = 64;
+const uint8_t LINE_LEN = 200;  // long enough for "wifi <name>|<password>"
 
 // ---------- State ----------
 MFRC522 rfid(RC_SS, RC_RST);
@@ -194,6 +198,10 @@ char terminalId[9];               // random, made on first power-on; part of eve
 uint32_t nextRef = 1, bootNo = 0;
 
 char rxBuf[LINE_LEN];
+
+// Wi-Fi and server settings. secrets.h gives the first defaults; after that they
+// live in flash and are changed over the USB cable (tools/set_wifi.py), no upload.
+String cfgSsid, cfgPass, cfgUrl, cfgToken;
 uint8_t rxLen = 0;
 
 // ---------- LCD (PCF8574 backpack: P0=RS P2=E P3=backlight P4-P7=D4-D7) ----------
@@ -224,14 +232,66 @@ bool lcdFind() {
   if (lcdAddr) lcdInit();
   return lcdAddr != 0;
 }
-void lcdLine(uint8_t row, const String &text) {
+// ---- Text on the 16x2 screen. A line longer than its space scrolls right to
+// left (ticker style). A line can end in a fixed mark (the '*') that never scrolls.
+const unsigned long SCROLL_STEP_MS = 350;   // one character every 350 ms
+const unsigned long SCROLL_HOLD_MS = 1200;  // pause at the start so the beginning can be read
+const char *SCROLL_GAP = "   ";             // space between the end and the start again
+String lcdText[2];
+char lcdMark[2] = {0, 0};
+uint16_t lcdOffset[2] = {0, 0};
+unsigned long lcdScrollAt[2] = {0, 0};
+unsigned long lcdMessageMs = 3000;          // how long the current message stays up
+
+uint8_t lcdSpace(uint8_t row) { return lcdMark[row] ? 15 : 16; }
+
+void lcdDraw(uint8_t row) {
   if (!lcdAddr) return;
+  const String &t = lcdText[row];
+  uint8_t space = lcdSpace(row);
+  String loop = t.length() > space ? t + SCROLL_GAP + t : t;
   lcdSend(row ? 0xC0 : 0x80, 0);
-  for (uint8_t i = 0; i < 16; i++) lcdSend(i < text.length() ? text[i] : ' ', 1);
+  for (uint8_t i = 0; i < space; i++) {
+    uint16_t k = lcdOffset[row] + i;
+    lcdSend(k < loop.length() ? loop[k] : ' ', 1);
+  }
+  if (lcdMark[row]) lcdSend(lcdMark[row], 1);
 }
+
+void lcdLineMark(uint8_t row, const String &text, char mark) {
+  lcdText[row] = text;
+  lcdMark[row] = mark;
+  lcdOffset[row] = 0;
+  lcdScrollAt[row] = millis() + SCROLL_HOLD_MS;
+  lcdDraw(row);
+}
+void lcdLine(uint8_t row, const String &text) { lcdLineMark(row, text, 0); }
+
+// Called from loop(): moves long lines on by one character
+void lcdScroll() {
+  for (uint8_t row = 0; row < 2; row++) {
+    uint16_t len = lcdText[row].length();
+    if (len <= lcdSpace(row) || (long)(millis() - lcdScrollAt[row]) < 0) continue;
+    lcdOffset[row]++;
+    lcdScrollAt[row] = millis() + SCROLL_STEP_MS;
+    if (lcdOffset[row] >= len + strlen(SCROLL_GAP)) {  // back at the start: pause again
+      lcdOffset[row] = 0;
+      lcdScrollAt[row] = millis() + SCROLL_HOLD_MS;
+    }
+    lcdDraw(row);
+  }
+}
+
+// Time to show a line once in full (scrolled all the way round), at least 3 s
+unsigned long lcdReadTime(const String &t) {
+  if (t.length() <= 16) return 3000;
+  return SCROLL_HOLD_MS + (t.length() + strlen(SCROLL_GAP)) * SCROLL_STEP_MS + 500;
+}
+
 void lcdMessage(const String &l1, const String &l2) {
   lcdLine(0, l1);
   lcdLine(1, l2);
+  lcdMessageMs = max(lcdReadTime(l1), lcdReadTime(l2));
   lcdMessageAt = millis();
   lcdShowingMessage = true;
 }
@@ -392,12 +452,8 @@ String routeName() { return serverRouteName.length() ? serverRouteName : String(
 
 void lcdIdle() {
   lcdInit();  // self-heal if the display lost power for a moment
-  String top = routeName().substring(0, 14);
-  if (serverOnline) {
-    while (top.length() < 15) top += ' ';
-    top += '*';
-  }
-  lcdLine(0, top);
+  // '*' in the corner = connected to the server; a long route name scrolls beside it
+  lcdLineMark(0, routeName(), serverOnline ? '*' : 0);
   lcdLine(1, readerOk ? String("KSh ") + currentFare() + "  Tap card" : String("Check reader!"));
   lcdShowingMessage = false;
 }
@@ -463,10 +519,10 @@ int serverRequest(const char *method, const char *path, const String &payload, S
   api.setReuse(true);
   api.setConnectTimeout(timeoutMs);
   api.setTimeout(timeoutMs);
-  String url = String(SERVER_URL) + path;
+  String url = cfgUrl + path;
   if (!(SECURE_SERVER ? api.begin(tlsClient, url) : api.begin(plainClient, url))) return -101;
   api.addHeader("Content-Type", "application/json");
-  api.addHeader("Authorization", String("Terminal ") + TERMINAL_TOKEN);  // identifies this vehicle
+  api.addHeader("Authorization", String("Terminal ") + cfgToken);  // identifies this vehicle
   int code = strcmp(method, "GET") == 0 ? api.GET() : api.POST(payload);
   body = code > 0 ? api.getString() : "";
   api.end();   // keeps the connection open for the next request
@@ -474,7 +530,7 @@ int serverRequest(const char *method, const char *path, const String &payload, S
     tlsClient.stop();
     plainClient.stop();
   }
-  if (code == 401 || code == 403) Serial.println("Server refused the terminal token: check TERMINAL_TOKEN in secrets.h");
+  if (code == 401 || code == 403) Serial.println("Server refused the terminal token: set it with:  token <token>");
   return code;
 }
 
@@ -487,8 +543,8 @@ void markServer(bool ok) {
       lcdMessage("Server linked", "Online mode");
     }
   } else if (serverOnline && millis() - lastServerOkAt > ONLINE_TIMEOUT_MS) {
-    serverOnline = false;   // the last fare and route from the server stay in use
-    Serial.println("Server: lost, offline mode");
+    serverOnline = false;  // keep serverFare / serverRouteName: offline uses the last known trip
+    Serial.printf("Server: lost, offline mode (still charging %s, KSh %u)\n", routeName().c_str(), currentFare());
     lcdMessage("Server offline", "Offline mode");
   }
 }
@@ -499,8 +555,11 @@ void fetchStatus() {
   if (code == 200) {
     long fare = jsonNumber(body, "fare", 0);
     if (fare > 0 && fare <= MAX_BALANCE) serverFare = fare;
-    serverRouteName = jsonString(body, "route_name");
+    String name = jsonString(body, "route_name");
+    if (name.length()) serverRouteName = name;
+    saveTripState();
     Serial.printf("Server status: %s, KSh %u\n", routeName().c_str(), currentFare());
+    if (!lcdShowingMessage) lcdIdle();
   }
 }
 
@@ -560,8 +619,8 @@ bool fetchCards() {
   http.setConnectTimeout(BULK_TIMEOUT_MS);
   http.setTimeout(BULK_TIMEOUT_MS);
   http.setReuse(false);   // one request, then the connection closes
-  if (!http.begin(String(SERVER_URL) + "/api/terminal/cards/")) return false;
-  http.addHeader("Authorization", String("Terminal ") + TERMINAL_TOKEN);
+  if (!http.begin(cfgUrl + "/api/terminal/cards/")) return false;
+  http.addHeader("Authorization", String("Terminal ") + cfgToken);
   int code = http.GET();
   int size = http.getSize();   // bytes in the answer (-1 = not given)
   if (code != 200) {
@@ -624,7 +683,7 @@ bool fetchCards() {
   return true;
 }
 
-void handleLine(char *line);  // below
+void handleLine(char *line, bool fromServer = false);  // below
 
 // Ask the server for waiting messages: {"lines": ["MSG Top-up +100|Bal: KSh 600", "FARE 70"]}
 void pollServer() {
@@ -651,7 +710,7 @@ void pollServer() {
     one.toCharArray(buf, sizeof(buf));
     Serial.printf("Server says: %s\n", buf);
     if (strcmp(buf, "trip") == 0) newTripFromServer();   // the crew started a trip on the dashboard
-    else handleLine(buf);
+    else handleLine(buf, true);                           // server lines may never change the Wi-Fi settings
     pos = q2;
   }
 }
@@ -793,8 +852,8 @@ void listCards() {
 
 void printStatus() {
   Serial.printf("Wi-Fi: %s", WiFi.status() == WL_CONNECTED ? "connected" : "NOT connected");
-  if (WiFi.status() == WL_CONNECTED) Serial.printf(" (%s, IP %s, %d dBm)", WIFI_SSID, WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  Serial.printf("\nServer: %s  %s\n", SERVER_URL, serverOnline ? "ONLINE" : "offline");
+  if (WiFi.status() == WL_CONNECTED) Serial.printf(" (%s, IP %s, %d dBm)", cfgSsid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  Serial.printf("\nServer: %s  %s\n", cfgUrl.c_str(), serverOnline ? "ONLINE" : "offline");
   Serial.printf("Route: %s  |  Fare: KSh %u\n", routeName().c_str(), currentFare());
   Serial.printf("Trip: server %u + %u started here  |  Cards: %u  |  Waiting to send: %u  |  Terminal %s\n",
                 serverTrip, tripOffset, cardCount, queuedCount(), terminalId);
@@ -818,9 +877,106 @@ void testSound(const char *arg) {
   if (!SOUND_ON) Serial.println("(SOUND_ON is false: the terminal is muted)");
 }
 
-void handleLine(char *line) {
+// ---------- Settings over the USB cable ----------
+void loadConfig() {
+  cfgSsid = store.getString("ssid", WIFI_SSID);
+  cfgPass = store.getString("pass", WIFI_PASS);
+  cfgUrl = store.getString("url", SERVER_URL);
+  cfgToken = store.getString("token", TERMINAL_TOKEN);
+  SECURE_SERVER = cfgUrl.startsWith("https");
+}
+
+void printConfig() {
+  String stars;
+  for (size_t i = 0; i < cfgPass.length(); i++) stars += '*';
+  Serial.printf("CONFIG wifi=%s pass=%s server=%s token=%s\n", cfgSsid.c_str(), stars.c_str(),
+                cfgUrl.c_str(), cfgToken.c_str());
+}
+
+// Join the saved network now and report the result (waits up to 15 s).
+void rejoinWifi() {
+  Serial.printf("Joining \"%s\"...\n", cfgSsid.c_str());
+  lcdMessage("Joining Wi-Fi", cfgSsid);
+  WiFi.disconnect();
+  delay(200);
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(200);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WIFI OK %s IP %s\n", cfgSsid.c_str(), WiFi.localIP().toString().c_str());
+    lcdMessage("Wi-Fi OK", WiFi.localIP().toString());
+    lastPollAt = 0;  // talk to the server straight away
+  } else {
+    Serial.printf("WIFI FAILED %s (status %d). Saved anyway; it keeps trying. Check the password, "
+                  "that the network is 2.4 GHz, and any MAC filter (allow %s)\n",
+                  cfgSsid.c_str(), WiFi.status(), WiFi.macAddress().c_str());
+    lcdMessage("Wi-Fi failed", cfgSsid);
+  }
+  wifiWasUp = WiFi.status() == WL_CONNECTED;
+}
+
+// Settings typed in the Serial Monitor or sent by tools/set_wifi.py.
+// Returns true if the line was a settings command.
+bool handleConfigCommand(char *line) {
+  if (strncasecmp(line, "wifi ", 5) == 0) {          // wifi <name>|<password>
+    char *name = line + 5;
+    char *bar = strchr(name, '|');
+    if (!bar) {
+      Serial.println("ERROR usage: wifi <name>|<password>   (a | between them)");
+      return true;
+    }
+    *bar = '\0';
+    if (strlen(name) == 0 || strlen(name) > 32 || strlen(bar + 1) > 63) {
+      Serial.println("ERROR name must be 1-32 characters, password at most 63");
+      return true;
+    }
+    cfgSsid = name;
+    cfgPass = bar + 1;
+    store.putString("ssid", cfgSsid);
+    store.putString("pass", cfgPass);
+    Serial.println("SAVED wifi");
+    rejoinWifi();
+  } else if (strncasecmp(line, "server ", 7) == 0) {  // server http://192.168.100.33:8000
+    String url = String(line + 7);
+    url.trim();
+    while (url.endsWith("/")) url.remove(url.length() - 1);
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      Serial.println("ERROR server must start with http:// or https://");
+      return true;
+    }
+    cfgUrl = url;
+    store.putString("url", cfgUrl);
+    SECURE_SERVER = cfgUrl.startsWith("https");
+    tlsClient.stop();     // drop the open connection to the old server
+    plainClient.stop();
+    Serial.printf("SAVED server %s\n", cfgUrl.c_str());
+    serverOnline = false;
+    lastServerOkAt = 0;
+    lastPollAt = 0;
+  } else if (strncasecmp(line, "token ", 6) == 0) {   // token demo-terminal-bus-1
+    cfgToken = String(line + 6);
+    cfgToken.trim();
+    store.putString("token", cfgToken);
+    Serial.printf("SAVED token %s\n", cfgToken.c_str());
+    lastPollAt = 0;
+  } else if (strcasecmp(line, "config") == 0) {
+    printConfig();
+  } else if (strcasecmp(line, "config reset") == 0) {   // back to the secrets.h defaults
+    store.remove("ssid"); store.remove("pass"); store.remove("url"); store.remove("token");
+    loadConfig();
+    Serial.println("SAVED defaults from secrets.h");
+    printConfig();
+    rejoinWifi();
+  } else {
+    return false;
+  }
+  return true;
+}
+
+void handleLine(char *line, bool fromServer) {
   while (*line == ' ') line++;
   if (*line == '\0') return;
+  if (!fromServer && handleConfigCommand(line)) return;
 
   if (strncmp(line, "MSG ", 4) == 0) {
     char *second = strchr(line + 4, '|');
@@ -834,6 +990,7 @@ void handleLine(char *line) {
     long f = atol(line + 5);
     if (f > 0 && f <= MAX_BALANCE) {
       serverFare = f;
+      saveTripState();
       Serial.printf("Fare is now KSh %ld\n", f);
       if (!lcdShowingMessage) lcdIdle();
     }
@@ -843,7 +1000,7 @@ void handleLine(char *line) {
     if (syncQueue()) fetchCards();
     listCards();
   } else if (strcasecmp(line, "help") == 0) {
-    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          cards kept for offline mode\n  status        Wi-Fi, server, trip, payments waiting to be sent\n  route <n>     switch route (starts a new trip)\n  trip          new trip\n  sync          send offline payments now and refresh the cards\n  sound [name]  play a payment sound (sound all = every one)\n  reset         back to the demo cards (only when nothing is waiting to be sent)");
+    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          cards kept for offline mode\n  status        Wi-Fi, server, trip, payments waiting to be sent\n  route <n>     switch route (starts a new trip)\n  trip          new trip\n  sync          send offline payments now and refresh the cards\n  sound [name]  play a payment sound (sound all = every one)\n  reset         back to the demo cards (only when nothing is waiting to be sent)\n  config        show Wi-Fi / server / token settings\n  wifi <name>|<password>   change Wi-Fi (saved, no upload needed)\n  server <url>  change the server, e.g. server https://<app>.up.railway.app\n  token <token> change the vehicle token\n  config reset  back to the secrets.h defaults");
   } else if (strncasecmp(line, "sound", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
     testSound(line + 5);
   } else if (strcasecmp(line, "list") == 0) {
@@ -939,11 +1096,13 @@ void setup() {
 
   tlsClient.setInsecure();
   store.begin("fare", false);
+  loadConfig();
   loadState();
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);  // no Wi-Fi power saving: it delays replies and makes requests time out
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
 
   Serial.println("\n========================================");
   Serial.println(" Bus fare terminal - ESP32 wireless");
@@ -980,7 +1139,8 @@ void loop() {
     }
   }
 
-  if (lcdShowingMessage && millis() - lcdMessageAt > LCD_MESSAGE_MS) lcdIdle();
+  if (lcdShowingMessage && millis() - lcdMessageAt > lcdMessageMs) lcdIdle();
+  lcdScroll();
 
   char line[LINE_LEN];
   if (readLine(line)) handleLine(line);

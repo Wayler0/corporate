@@ -14,6 +14,9 @@ function TopUp({ me, onDone }) {
   const amount = Number(amountText)
   const valid = Number.isInteger(amount) && amount >= 1 && amount <= room
 
+  if (!me.topup_enabled) {
+    return <Banner>Top-up is not available yet: mobile money payments are coming.</Banner>
+  }
   if (!me.payment_method) {
     return <Banner>Add a payment method on your <a href="#/profile">Profile</a> to top up.</Banner>
   }
