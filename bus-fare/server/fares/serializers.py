@@ -92,9 +92,11 @@ class ReservedSeatsSerializer(serializers.Serializer):
 
 
 class RouteSerializer(serializers.ModelSerializer):
+    sacco = serializers.CharField(source='sacco.name', default=None)
+
     class Meta:
         model = Route
-        fields = ['id', 'name', 'fare']
+        fields = ['id', 'name', 'fare', 'sacco']
 
 
 class OperatorTapSerializer(serializers.ModelSerializer):
@@ -111,12 +113,13 @@ class AccountTransactionSerializer(serializers.ModelSerializer):
     """One line of an employee's statement."""
     route = serializers.CharField(source='trip.route.name', default=None)
     vehicle = serializers.CharField(source='vehicle.registration', default=None)
+    sacco = serializers.CharField(source='vehicle.sacco.name', default=None)
     name = serializers.CharField(source='passenger.name', default=None)
 
     class Meta:
         model = Transaction
         fields = ['id', 'kind', 'result', 'amount', 'paid_by', 'method', 'balance_after',
-                  'route', 'vehicle', 'name', 'created_at']
+                  'route', 'vehicle', 'sacco', 'name', 'created_at']
 
 
 def validate_payment_account(method, account):

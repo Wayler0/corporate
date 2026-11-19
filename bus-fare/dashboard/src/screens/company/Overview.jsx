@@ -69,7 +69,7 @@ export default function Overview() {
                   <ResultBadge result={t.result} />
                   <div className="grow">
                     <span className="name">{t.name}</span>
-                    <span className="muted small">{t.route} · {t.vehicle} · {shortDate(t.created_at)} {clock(t.created_at)}</span>
+                    <span className="muted small">{[t.sacco, t.route, t.vehicle].filter(Boolean).join(' · ')} · {shortDate(t.created_at)} {clock(t.created_at)}</span>
                   </div>
                   <span className="amount num">{t.amount ? money(t.amount) : '—'}</span>
                 </li>

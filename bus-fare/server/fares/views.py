@@ -3,6 +3,7 @@
   terminal       a vehicle's bridge (Authorization: Terminal <token>)
   auth           anyone: log in, log out, who am I, change password
   operator       bus crew: their own vehicle only
+  sacco          a SACCO's admin: their own SACCO's vehicles and routes only
   company        a company admin: their own company only
   me             an employee: their own account only
 """
@@ -10,7 +11,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.http import HttpResponse
 from django.db import transaction as db_transaction
-from django.db.models import Min, Q
+from django.db.models import Count, Min, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -21,7 +22,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Passenger, Profile, Route, Transaction, Trip
-from .permissions import IsCompanyAdmin, IsEmployee, IsOperator, IsTerminal, TerminalAuthentication
+from .permissions import IsCompanyAdmin, IsEmployee, IsOperator, IsSaccoAdmin, IsTerminal, TerminalAuthentication
 from .serializers import (
     AccountTransactionSerializer, EmployeeSerializer, LoginSerializer, NewTripRequestSerializer,
     OfflineSyncSerializer,
@@ -31,7 +32,7 @@ from .serializers import (
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
     block_card, create_employee, get_current_trip, process_tap, reserved_summary, reset_password,
-    set_reserved_seats, settlements_total, start_new_trip, sync_offline, tap_totals, terminal_cards,
+    routes_for, sacco_taps, sacco_vehicle_summary, set_reserved_seats, settlements_total, start_new_trip, sync_offline, tap_totals, terminal_cards,
     terminal_status, top_up, trip_stats,
 )
 
@@ -41,7 +42,9 @@ HISTORY = 30         # lines on an employee's statement
 
 
 def trip_summary(trip):
-    return {'trip': trip.pk, 'route': trip.route_id, 'route_name': trip.route.name, 'fare': trip.route.fare}
+    sacco = trip.route.sacco
+    return {'trip': trip.pk, 'route': trip.route_id, 'route_name': trip.route.name, 'fare': trip.route.fare,
+            'sacco': sacco.name if sacco else None}
 
 
 def no_route(error):
@@ -53,7 +56,7 @@ def month_start():
 
 
 def statement(passenger):
-    return (passenger.transactions.select_related('trip__route', 'vehicle', 'passenger')[:HISTORY])
+    return (passenger.transactions.select_related('trip__route', 'vehicle__sacco', 'passenger')[:HISTORY])
 
 
 # =====================================================================
@@ -157,11 +160,14 @@ def describe(user):
         'must_change_password': profile.must_change_password,
     }
     if profile.vehicle:
+        sacco = profile.vehicle.sacco
         data['vehicle'] = {'id': profile.vehicle_id, 'registration': profile.vehicle.registration,
-                           'name': profile.vehicle.name}
+                           'name': profile.vehicle.name, 'sacco': sacco.name if sacco else None}
     if profile.company:
         data['company'] = {'id': profile.company_id, 'name': profile.company.name,
                            'billing': profile.company.billing}
+    if profile.sacco:
+        data['sacco'] = {'id': profile.sacco_id, 'name': profile.sacco.name}
     return data
 
 
@@ -250,7 +256,7 @@ class OperatorTripsView(OperatorView):
 
     def get(self, request):
         vehicle = self.vehicle
-        trips = Trip.objects.filter(vehicle=vehicle).select_related('route').order_by('-id')[:TRIP_HISTORY]
+        trips = Trip.objects.filter(vehicle=vehicle).select_related('route__sacco').order_by('-id')[:TRIP_HISTORY]
         today = timezone.localdate()
         totals = tap_totals(Transaction.objects.filter(
             vehicle=vehicle, kind=Transaction.Kind.TAP, created_at__date=today))
@@ -272,6 +278,8 @@ class OperatorNewTripView(OperatorView):
             trip = start_new_trip(self.vehicle, serializer.validated_data.get('route'))
         except NoRouteError as error:
             return no_route(error)
+        except NotAllowedError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(trip_summary(trip), status=status.HTTP_201_CREATED)
 
 
@@ -293,11 +301,87 @@ class OperatorReservedView(OperatorView):
 
 
 class RouteListView(APIView):
-    """GET /api/routes/ -> [{"id": 1, "name": "Campus shuttle", "fare": 50}, ...]
-    Fares are set by the platform in the Django admin."""
+    """GET /api/routes/ -> [{"id": 1, "name": "Campus shuttle", "fare": 50, "sacco": "..."}, ...]
+    The bus crew sees only their own SACCO's routes. Fares are the ones agreed with
+    each SACCO, entered by the platform in the Django admin."""
 
     def get(self, request):
-        return Response(RouteSerializer(Route.objects.order_by('id'), many=True).data)
+        profile = getattr(request.user, 'profile', None)
+        if profile and profile.role == Profile.Role.OPERATOR and profile.vehicle:
+            routes = routes_for(profile.vehicle)
+        else:
+            routes = Route.objects.order_by('id')
+        return Response(RouteSerializer(routes.select_related('sacco'), many=True).data)
+
+
+# =====================================================================
+# SACCO admin: their own SACCO's vehicles and routes only
+# =====================================================================
+class SaccoView(APIView):
+    permission_classes = [IsSaccoAdmin]
+
+    @property
+    def sacco(self):
+        return self.request.user.profile.sacco
+
+
+class SaccoOverviewView(SaccoView):
+    """GET /api/sacco/ -> the SACCO, money and riders today and this month on its
+    vehicles, each route with its agreed fare, and the corporate clients riding."""
+
+    def get(self, request):
+        sacco = self.sacco
+        taps = sacco_taps(sacco)
+        month_taps = taps.filter(created_at__gte=month_start())
+        month = tap_totals(month_taps)
+        paid = month_taps.filter(result=Transaction.Result.PAID)
+        vehicles = list(sacco.vehicles.all())
+        routes = []
+        for route in sacco.routes.order_by('id'):
+            totals = tap_totals(month_taps.filter(trip__route=route))
+            routes.append({'id': route.pk, 'name': route.name, 'fare': route.fare,
+                           'month': {'collected': totals['collected'], 'paid': totals['paid']}})
+        clients = (paid.filter(passenger__company__isnull=False)
+                   .values('passenger__company__name')
+                   .annotate(riders=Count('passenger', distinct=True), trips=Count('id'), collected=Sum('amount'))
+                   .order_by('-collected'))
+        return Response({
+            'name': sacco.name, 'licence_number': sacco.licence_number,
+            'today': tap_totals(taps.filter(created_at__date=timezone.localdate())),
+            'month': {**month, 'riders': paid.values('passenger').distinct().count()},
+            'fleet': {'vehicles': len(vehicles),
+                      'online': sum(1 for v in vehicles if terminal_status(v)['online'])},
+            'routes': routes,
+            'clients': [{'company': c['passenger__company__name'], 'riders': c['riders'],
+                         'trips': c['trips'], 'collected': c['collected']} for c in clients],
+        })
+
+
+class SaccoFleetView(SaccoView):
+    """GET /api/sacco/vehicles/ -> each of this SACCO's vehicles: terminal online,
+    the trip it is running, reserved seats, today's takings."""
+
+    def get(self, request):
+        vehicles = self.sacco.vehicles.order_by('registration')
+        return Response([sacco_vehicle_summary(v) for v in vehicles])
+
+
+class SaccoReservedView(SaccoView):
+    """POST /api/sacco/vehicles/<id>/reserved/ {"seats": 6} -> {"reserved", "boarded", "left"}.
+    The SACCO sets how many seats a bus holds for corporate card holders this trip
+    (bus-fare/BOARDING_DESIGN.md). Only its own vehicles."""
+
+    def post(self, request, pk):
+        vehicle = get_object_or_404(self.sacco.vehicles, pk=pk)
+        serializer = ReservedSeatsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            trip = set_reserved_seats(vehicle, serializer.validated_data['seats'])
+        except NoRouteError as error:
+            return no_route(error)
+        except AmountError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(reserved_summary(trip))
 
 
 # =====================================================================
@@ -332,7 +416,7 @@ class CompanyOverviewView(CompanyView):
             'active_employees': employees.filter(active=True).count(),
             'month': {'spent': totals['collected'], 'trips': totals['paid'], 'declined': totals['refused']},
             'recent': AccountTransactionSerializer(
-                month_taps.select_related('trip__route', 'vehicle', 'passenger')[:10], many=True).data,
+                month_taps.select_related('trip__route', 'vehicle__sacco', 'passenger')[:10], many=True).data,
         }
         if company.company_pays:
             data['bill'] = {

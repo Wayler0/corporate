@@ -67,6 +67,13 @@ class IsCompanyAdmin(HasRole):
         return super().has_permission(request, view) and request.user.profile.company_id is not None
 
 
+class IsSaccoAdmin(HasRole):
+    role = Profile.Role.SACCO_ADMIN
+
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) and request.user.profile.sacco_id is not None
+
+
 class IsEmployee(HasRole):
     role = Profile.Role.EMPLOYEE
 

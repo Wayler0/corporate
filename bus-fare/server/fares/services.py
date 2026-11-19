@@ -52,37 +52,92 @@ def normalize_phone(text):
 # ---------- Trips (one running trip per vehicle) ----------
 def running_trip(vehicle):
     return (Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True)
-            .select_related('route').order_by('-id').first())
+            .select_related('route__sacco').order_by('-id').first())
+
+
+def routes_for(vehicle):
+    """The routes this vehicle may run: its own SACCO's (a vehicle with no SACCO
+    yet runs the routes that have none either)."""
+    return Route.objects.filter(sacco_id=vehicle.sacco_id).order_by('id')
+
+
+def route_allowed(vehicle, route):
+    return route.sacco_id == vehicle.sacco_id
+
+
+def first_route(vehicle):
+    route = routes_for(vehicle).first()
+    if route is None:
+        raise NoRouteError("This vehicle's SACCO has no routes yet. Add them in the admin "
+                           '(or run python manage.py seed_demo).')
+    return route
 
 
 def get_current_trip(vehicle):
-    """The trip this vehicle is running now. Starts one on the first route if none is."""
+    """The trip this vehicle is running now. Starts one if none is: on the route it
+    ran last, or else on its SACCO's first route (the crew changes it on the Trips screen)."""
     trip = running_trip(vehicle)
     if trip:
         return trip
-    # Carry on with the route this vehicle ran last; only a vehicle that has never
-    # run a trip starts on the first route (the crew changes it on the Trips screen)
     last = Trip.objects.filter(vehicle=vehicle).select_related('route').order_by('-id').first()
-    route = last.route if last else Route.objects.order_by('id').first()
-    if route is None:
-        raise NoRouteError('Add a route first (python manage.py seed_demo).')
+    if last and route_allowed(vehicle, last.route):
+        route = last.route
+    else:   # never ran a trip, or has moved to another SACCO since
+        route = first_route(vehicle)
     return Trip.objects.create(vehicle=vehicle, route=route)
 
 
 @transaction.atomic
 def start_new_trip(vehicle, route=None):
     """End this vehicle's running trip and start a new one: every card can pay
-    once again. With no route given, the new trip stays on the same route."""
+    once again. With no route given, the new trip stays on the same route.
+    A route of another SACCO is refused: its fare was not agreed for this vehicle."""
     current = running_trip(vehicle)
     if route is None:
-        route = current.route if current else Route.objects.order_by('id').first()
-    if route is None:
-        raise NoRouteError('Add a route first (python manage.py seed_demo).')
+        if current and route_allowed(vehicle, current.route):
+            route = current.route
+        else:
+            route = first_route(vehicle)
+    elif not route_allowed(vehicle, route):
+        raise NotAllowedError("That route belongs to another SACCO. Pick one of this vehicle's routes.")
     Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True).update(ended_at=timezone.now())
     trip = Trip.objects.create(vehicle=vehicle, route=route)
     queue_for_terminal(vehicle, f'FARE {route.fare}')
     queue_for_terminal(vehicle, 'trip')
     return trip
+
+
+def vehicle_moved_sacco(vehicle):
+    """A vehicle now belongs to another SACCO (platform admin). Its running trip was on
+    the old SACCO's route and fare, so end it; a new trip starts on its new SACCO's
+    first route and the terminal is told the new fare."""
+    Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True).update(ended_at=timezone.now())
+    try:
+        start_new_trip(vehicle)
+    except NoRouteError:
+        pass   # the new SACCO has no routes yet; taps answer 503 until one is added
+
+
+# ---------- SACCO dashboard ----------
+def sacco_taps(sacco):
+    """Every tap on this SACCO's vehicles."""
+    return Transaction.objects.filter(kind=Transaction.Kind.TAP, vehicle__sacco=sacco)
+
+
+def sacco_vehicle_summary(vehicle):
+    """One line of the SACCO's fleet: what the bus is running now and how it is doing today.
+    Shows the running trip without starting one (a SACCO admin looking must not change it)."""
+    trip = running_trip(vehicle)
+    today = tap_totals(Transaction.objects.filter(
+        vehicle=vehicle, kind=Transaction.Kind.TAP, created_at__date=timezone.localdate()))
+    return {
+        'id': vehicle.pk, 'registration': vehicle.registration, 'name': vehicle.name,
+        'terminal': terminal_status(vehicle),
+        'trip': {'trip': trip.pk, 'route_name': trip.route.name, 'fare': trip.route.fare,
+                 'started_at': trip.started_at} if trip else None,
+        'seats': reserved_summary(trip) if trip else None,
+        'today': {'collected': today['collected'], 'paid': today['paid'], 'refused': today['refused']},
+    }
 
 
 def reserved_summary(trip):
@@ -110,8 +165,8 @@ def set_reserved_seats(vehicle, seats):
 
 @transaction.atomic
 def change_fare(route, fare):
-    """Set a route's fare (platform staff, from the Django admin). Every vehicle
-    running a trip on that route is told."""
+    """Set a route's fare as agreed with its SACCO (platform staff, from the Django
+    admin). Every vehicle running a trip on that route is told."""
     if fare < 1 or fare > MAX_BALANCE:
         raise AmountError(f'Fare must be 1 to {MAX_BALANCE}.')
     route.fare = fare

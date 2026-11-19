@@ -1,9 +1,9 @@
 import { useAuth } from '../auth.jsx'
 import { PasswordForm } from './ChangePassword.jsx'
 
-const ROLE = { OPERATOR: 'Bus crew', COMPANY_ADMIN: 'Company admin', EMPLOYEE: 'Employee' }
+const ROLE = { OPERATOR: 'Bus crew', COMPANY_ADMIN: 'Company admin', SACCO_ADMIN: 'SACCO admin', EMPLOYEE: 'Employee' }
 
-// Who is logged in, change password, log out (crew and company admins)
+// Who is logged in, change password, log out (crew, company and SACCO admins)
 export default function Account() {
   const { user, logout } = useAuth()
   return (
@@ -16,6 +16,7 @@ export default function Account() {
           <div className="item"><span className="grow muted">Role</span><strong>{ROLE[user.role]}</strong></div>
           {user.vehicle && <div className="item"><span className="grow muted">Vehicle</span><strong>{user.vehicle.registration}</strong></div>}
           {user.company && <div className="item"><span className="grow muted">Company</span><strong>{user.company.name}</strong></div>}
+          {user.sacco && <div className="item"><span className="grow muted">SACCO</span><strong>{user.sacco.name}</strong></div>}
         </section>
         <PasswordForm />
         <button type="button" className="btn secondary" onClick={logout}>Log out</button>

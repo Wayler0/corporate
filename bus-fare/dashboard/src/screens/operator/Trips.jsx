@@ -103,7 +103,10 @@ export default function Trips() {
           )}
         </section>
 
-        <p className="muted small note">Fares are set by the transport office. Ask them if a fare is wrong.</p>
+        <p className="muted small note">
+          {trip.sacco ? `These are ${trip.sacco}'s routes, at the fares agreed with your SACCO.` : 'Fares are set by the transport office.'}
+          {' '}Ask your SACCO office if a fare is wrong.
+        </p>
 
         <section className="stack">
           <h2>Earlier trips</h2>

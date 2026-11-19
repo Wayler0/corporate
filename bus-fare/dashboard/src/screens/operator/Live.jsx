@@ -55,7 +55,7 @@ export default function Live() {
       <header className="topbar dark">
         <div className="topbar-text">
           <span className="topbar-title">{trip.route_name} · {money(trip.fare)}</span>
-          <span className="topbar-sub">{user.vehicle.registration} · Trip {trip.trip} · since {clock(trip.started_at)}</span>
+          <span className="topbar-sub">{user.vehicle.sacco ? `${user.vehicle.sacco} · ` : ''}{user.vehicle.registration} · Trip {trip.trip} · since {clock(trip.started_at)}</span>
         </div>
         <span className={`pill ${online ? 'pill-on' : 'pill-off'}`}>
           <span className="dot" />

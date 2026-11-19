@@ -113,7 +113,7 @@ export default function Wallet() {
                 <li key={t.id} className="item">
                   <ResultBadge result={t.result} />
                   <div className="grow">
-                    <span className="small">{t.kind === 'TOPUP' ? `Top-up · ${paymentLabel(t.method)}` : `${t.route} · ${t.vehicle}`}</span>
+                    <span className="small">{t.kind === 'TOPUP' ? `Top-up · ${paymentLabel(t.method)}` : [t.sacco, t.route, t.vehicle].filter(Boolean).join(' · ')}</span>
                     <span className="muted small">{shortDate(t.created_at)} {clock(t.created_at)}{t.paid_by === 'COMPANY' ? ' · paid by company' : ''}</span>
                   </div>
                   <span className="num strong">{t.kind === 'TOPUP' ? `+${t.amount}` : t.amount ? `−${t.amount}` : '—'}</span>

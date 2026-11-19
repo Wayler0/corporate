@@ -9,8 +9,8 @@ from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
-from .models import Company, Passenger, Route, Settlement, Transaction, Trip, Vehicle
-from .services import change_fare, get_current_trip, normalize_phone
+from .models import Company, Passenger, Route, Sacco, Settlement, Transaction, Trip, Vehicle
+from .services import change_fare, get_current_trip, normalize_phone, vehicle_moved_sacco
 
 PASSWORD = 'demo-pass-2026'
 BUS1 = 'demo-terminal-bus-1'
@@ -624,3 +624,141 @@ class ReservedSeatsTests(Base):
     def test_only_the_operator_can_set_reserved_seats(self):
         self.assertEqual(APIClient().post('/api/operator/reserved/', {'seats': 5}, format='json').status_code,
                          403)
+
+
+class SaccoTests(Base):
+    """Each SACCO has its own routes and agreed fares; a card is charged the fare of
+    the route the vehicle it taps on is running."""
+
+    def setUp(self):
+        super().setUp()
+        self.demo = Sacco.objects.get(name='Demo Sacco')
+        self.other = Sacco.objects.create(name='Other Sacco')
+        # The same road with another SACCO, at that SACCO's own fare
+        self.other_chuka = Route.objects.create(sacco=self.other, name='Marimanti-Chuka', fare=120)
+
+    def move_bus2_to_other(self):
+        self.bus2.sacco = self.other
+        self.bus2.save()
+        vehicle_moved_sacco(self.bus2)
+
+    def test_demo_data_belongs_to_the_demo_sacco(self):
+        self.assertEqual(self.bus1.sacco, self.demo)
+        self.assertEqual(set(self.demo.routes.values_list('name', flat=True)),
+                         {'Campus shuttle', 'Marimanti-Chuka', 'Marimanti-Meru'})
+
+    def test_same_route_name_different_fare_per_sacco(self):
+        self.move_bus2_to_other()
+        self.assertEqual(self.tap('E5734107', BUS2).json(), {'result': 'PAID', 'fare': 120, 'balance': 380})
+        self.assertEqual(self.tap('008DEC53', BUS1).json()['fare'], 50)
+
+    def test_crew_sees_only_their_own_saccos_routes(self):
+        self.move_bus2_to_other()
+        names = [(r['name'], r['fare'], r['sacco']) for r in self.person('crew2').get('/api/routes/').json()]
+        self.assertEqual(names, [('Marimanti-Chuka', 120, 'Other Sacco')])
+        self.assertEqual(len(self.person('crew1').get('/api/routes/').json()), 3)
+
+    def test_crew_cannot_start_a_trip_on_another_saccos_route(self):
+        before = get_current_trip(self.bus1)
+        response = self.person('crew1').post('/api/operator/trip/', {'route': self.other_chuka.pk}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(get_current_trip(self.bus1), before)
+
+    def test_moving_a_vehicle_ends_its_trip_and_tells_the_terminal(self):
+        self.tap('E5734107', BUS2)
+        self.poll(BUS2)
+        self.move_bus2_to_other()
+        self.assertEqual(self.poll(BUS2), ['FARE 120', 'trip'])
+        self.assertEqual(self.terminal(BUS2).get('/api/status/').json()['sacco'], 'Other Sacco')
+
+    def test_a_new_vehicle_starts_on_its_own_saccos_route(self):
+        bus3 = Vehicle.objects.create(registration='KDC 003C', sacco=self.other, terminal_token='bus-3-token')
+        self.assertEqual(self.tap('E5734107', 'bus-3-token').json()['fare'], 120)
+        self.assertEqual(get_current_trip(bus3).route, self.other_chuka)
+
+    def test_a_sacco_without_routes_gives_503(self):
+        empty = Sacco.objects.create(name='Empty Sacco')
+        Vehicle.objects.create(registration='KDD 004D', sacco=empty, terminal_token='bus-4-token')
+        self.assertEqual(self.tap('E5734107', 'bus-4-token').status_code, 503)
+
+    def test_crew_and_statements_show_the_sacco(self):
+        self.assertEqual(self.person('crew1').get('/api/auth/me/').json()['user']['vehicle']['sacco'], 'Demo Sacco')
+        self.tap('E5734107')
+        line = self.person('0700000001').get('/api/me/').json()
+        taps = [t for t in line['transactions'] if t['kind'] == 'TAP']
+        self.assertEqual(taps[0]['sacco'], 'Demo Sacco')
+
+    def test_route_names_are_unique_within_a_sacco_only(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Route.objects.create(sacco=self.other, name='Marimanti-Chuka', fare=130)
+
+    def test_seed_demo_gives_older_routes_and_vehicles_the_demo_sacco(self):
+        Route.objects.filter(sacco=self.demo).update(sacco=None)
+        Vehicle.objects.update(sacco=None)
+        call_command('seed_demo', verbosity=0)
+        self.assertEqual(Route.objects.filter(sacco__isnull=True).count(), 0)
+        self.assertEqual(Vehicle.objects.filter(sacco=self.demo).count(), 2)
+
+
+class SaccoDashboardTests(Base):
+    """A SACCO admin sees and manages only their own SACCO's vehicles and routes."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = Sacco.objects.create(name='Other Sacco')
+        Route.objects.create(sacco=self.other, name='Marimanti-Chuka', fare=120)
+        self.bus2.sacco = self.other
+        self.bus2.save()
+        vehicle_moved_sacco(self.bus2)
+        self.admin = self.person('saccoadmin')
+
+    def test_overview_counts_only_this_saccos_taps(self):
+        self.tap('E5734107', BUS1)              # Demo Sacco, KSh 50
+        self.tap('008DEC53', BUS1)              # Demo Sacco, KSh 50
+        self.tap('A1B2C3D4', BUS2)              # Other Sacco: not counted
+        data = self.admin.get('/api/sacco/').json()
+        self.assertEqual(data['name'], 'Demo Sacco')
+        self.assertEqual(data['today']['collected'], 100)
+        self.assertEqual(data['month']['riders'], 2)
+        self.assertEqual(data['fleet']['vehicles'], 1)
+        shuttle = next(r for r in data['routes'] if r['name'] == 'Campus shuttle')
+        self.assertEqual(shuttle['month'], {'collected': 100, 'paid': 2})
+        self.assertEqual(data['clients'], [{'company': 'Demo Staff Ltd', 'riders': 2, 'trips': 2, 'collected': 100}])
+
+    def test_fleet_shows_only_own_vehicles_with_their_trip(self):
+        self.tap('E5734107', BUS1)
+        fleet = self.admin.get('/api/sacco/vehicles/').json()
+        self.assertEqual([v['registration'] for v in fleet], ['KDA 001A'])
+        self.assertEqual(fleet[0]['trip']['route_name'], 'Campus shuttle')
+        self.assertEqual(fleet[0]['today']['collected'], 50)
+        self.assertTrue(fleet[0]['terminal']['online'] is False)
+
+    def test_looking_at_the_fleet_does_not_start_a_trip(self):
+        Trip.objects.filter(vehicle=self.bus1).delete()
+        self.assertIsNone(self.admin.get('/api/sacco/vehicles/').json()[0]['trip'])
+        self.assertFalse(Trip.objects.filter(vehicle=self.bus1).exists())
+
+    def test_set_reserved_seats_on_own_vehicle(self):
+        response = self.admin.post(f'/api/sacco/vehicles/{self.bus1.pk}/reserved/', {'seats': 6}, format='json')
+        self.assertEqual(response.json(), {'reserved': 6, 'boarded': 0, 'left': 6})
+        self.tap('E5734107', BUS1)
+        self.assertEqual(self.person('crew1').get('/api/operator/live/').json()['seats']['left'], 5)
+
+    def test_cannot_touch_another_saccos_vehicle(self):
+        response = self.admin.post(f'/api/sacco/vehicles/{self.bus2.pk}/reserved/', {'seats': 6}, format='json')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(get_current_trip(self.bus2).reserved_seats, 0)
+
+    def test_other_roles_cannot_open_sacco_pages(self):
+        for username in ('crew1', 'staffadmin', '0700000001'):
+            client = self.person(username)
+            self.assertEqual(client.get('/api/sacco/').status_code, 403, username)
+            self.assertEqual(client.get('/api/sacco/vehicles/').status_code, 403, username)
+        self.assertEqual(APIClient().get('/api/sacco/').status_code, 403)
+
+    def test_sacco_admin_cannot_open_other_dashboards(self):
+        self.assertEqual(self.admin.get('/api/company/').status_code, 403)
+        self.assertEqual(self.admin.get('/api/operator/live/').status_code, 403)
+
+    def test_me_names_the_sacco(self):
+        self.assertEqual(self.admin.get('/api/auth/me/').json()['user']['sacco']['name'], 'Demo Sacco')

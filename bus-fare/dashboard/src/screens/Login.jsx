@@ -29,7 +29,7 @@ export default function Login() {
       <div className="stack-tight">
         <span className="brand">Fare</span>
         <h1>Log in</h1>
-        <p className="muted">Bus crew, company admins and employees all log in here.</p>
+        <p className="muted">Bus crew, SACCO and company admins, and employees all log in here.</p>
       </div>
       <form className="card stack pad" onSubmit={submit}>
         <Field label="Phone number or username" hint="Employees: the phone number your company registered.">

@@ -1,7 +1,7 @@
 """python manage.py seed_demo
-Loads demo data: the same routes and test cards that are built into the Uno
-firmware (bus-fare/terminal_mvp/terminal_mvp.ino), two demo companies, two
-vehicles and a login for each dashboard. Safe to run again: existing rows are
+Loads demo data: a demo SACCO with the same routes and fares that are built into
+the Uno firmware (bus-fare/terminal_mvp/terminal_mvp.ino), the same test cards, two
+demo companies, two vehicles of that SACCO and a login for each dashboard. Safe to run again: existing rows are
 left as they are.
 
 DEMO ONLY: by default the logins use a published password and the vehicles use
@@ -16,10 +16,13 @@ import os
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
-from fares.models import Company, Passenger, Profile, Route, Vehicle
+from fares.models import Company, Passenger, Profile, Route, Sacco, Vehicle
 
 DEMO_PASSWORD = os.environ.get('DEMO_PASSWORD') or 'demo-pass-2026'
 
+SACCO = 'Demo Sacco'
+
+# the demo SACCO's routes and agreed fares
 ROUTES = [('Campus shuttle', 50), ('Marimanti-Chuka', 100), ('Marimanti-Meru', 250)]
 
 COMPANIES = [
@@ -47,6 +50,7 @@ LOGINS = [
     ('crew2', Profile.Role.OPERATOR, 'KDB 002B'),
     ('staffadmin', Profile.Role.COMPANY_ADMIN, 'Demo Staff Ltd'),
     ('postpaidadmin', Profile.Role.COMPANY_ADMIN, 'Demo Postpaid Ltd'),
+    ('saccoadmin', Profile.Role.SACCO_ADMIN, SACCO),
 ]
 
 
@@ -55,8 +59,15 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         User = get_user_model()
+        sacco, _ = Sacco.objects.get_or_create(name=SACCO)
         for name, fare in ROUTES:
-            Route.objects.get_or_create(name=name, defaults={'fare': fare})
+            # Older databases have these routes without a SACCO: give them the demo one
+            route = Route.objects.filter(name=name, sacco__isnull=True).first()
+            if route:
+                route.sacco = sacco
+                route.save(update_fields=['sacco'])
+            else:
+                Route.objects.get_or_create(sacco=sacco, name=name, defaults={'fare': fare})
         companies = {}
         for name, billing, limit in COMPANIES:
             companies[name], _ = Company.objects.get_or_create(
@@ -64,7 +75,10 @@ class Command(BaseCommand):
         vehicles = {}
         for registration, nickname, token in VEHICLES:
             vehicles[registration], _ = Vehicle.objects.get_or_create(
-                registration=registration, defaults={'name': nickname, 'terminal_token': token})
+                registration=registration, defaults={'name': nickname, 'terminal_token': token, 'sacco': sacco})
+            if vehicles[registration].sacco is None:   # older databases
+                vehicles[registration].sacco = sacco
+                vehicles[registration].save(update_fields=['sacco'])
 
         def login(username, first_name, role, **where):
             user, created = User.objects.get_or_create(username=username, defaults={'first_name': first_name})
@@ -87,18 +101,21 @@ class Command(BaseCommand):
         for username, role, target in LOGINS:
             if role == Profile.Role.OPERATOR:
                 login(username, username, role, vehicle=vehicles[target])
+            elif role == Profile.Role.SACCO_ADMIN:
+                login(username, username, role, sacco=sacco)
             else:
                 login(username, username, role, company=companies[target])
 
         if options['verbosity'] == 0:
             return
         self.stdout.write(self.style.SUCCESS(
-            f'{Route.objects.count()} routes, {Company.objects.count()} companies, '
+            f'{Sacco.objects.count()} SACCOs, {Route.objects.count()} routes, {Company.objects.count()} companies, '
             f'{Passenger.objects.count()} employees, {Vehicle.objects.count()} vehicles.'))
         secret = 'DEMO_PASSWORD' in os.environ
         self.stdout.write('Demo logins (password: ' + ('the DEMO_PASSWORD variable' if secret else f'"{DEMO_PASSWORD}"') + '):')
         self.stdout.write('  crew1 / crew2              operator of KDA 001A / KDB 002B')
         self.stdout.write('  staffadmin / postpaidadmin company admin (employees pay / company pays)')
+        self.stdout.write(f'  saccoadmin                 SACCO admin of {SACCO}')
         self.stdout.write('  0700000001 ... 0700000004  employees (White card, Blue fob, low funds, Kim)')
         if 'DEMO_TERMINAL_TOKEN_BUS1' not in os.environ:
             self.stdout.write('Bridges: python3 bridge.py --token demo-terminal-bus-1   (or demo-terminal-bus-2)')

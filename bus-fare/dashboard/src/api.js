@@ -79,6 +79,11 @@ export const api = {
   newTrip: (routeId) => post('/operator/trip/', routeId ? { route: routeId } : {}),
   setReserved: (seats) => post('/operator/reserved/', { seats }),
 
+  // SACCO admin
+  sacco: () => get('/sacco/'),
+  fleet: () => get('/sacco/vehicles/'),
+  setVehicleReserved: (id, seats) => post(`/sacco/vehicles/${id}/reserved/`, { seats }),
+
   // company admin
   company: () => get('/company/'),
   employees: (q = '') => get('/company/employees/' + (q ? `?q=${encodeURIComponent(q)}` : '')),

@@ -25,6 +25,11 @@ urlpatterns = [
     path('operator/reserved/', views.OperatorReservedView.as_view(), name='operator-reserved'),
     path('routes/', views.RouteListView.as_view(), name='routes'),
 
+    # SACCO admin: their own SACCO's vehicles and routes
+    path('sacco/', views.SaccoOverviewView.as_view(), name='sacco'),
+    path('sacco/vehicles/', views.SaccoFleetView.as_view(), name='sacco-vehicles'),
+    path('sacco/vehicles/<int:pk>/reserved/', views.SaccoReservedView.as_view(), name='sacco-reserved'),
+
     # Company admin: their own company
     path('company/', views.CompanyOverviewView.as_view(), name='company'),
     path('company/employees/', views.EmployeeListView.as_view(), name='employees'),

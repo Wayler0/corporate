@@ -6,10 +6,15 @@ Who is who:
     or the company pays for all of them and settles the bill later.
   * Passenger: an employee with a card (kept as "Passenger" so the fare code
     and the firmware's wording stay the same).
+  * Sacco: a matatu SACCO the platform has an agreement with. It owns its
+    vehicles and its routes, and each of its routes has the fare agreed with it,
+    so the same road can cost different amounts with different SACCOs.
   * Vehicle: one bus or matatu with its own terminal. Its bridge proves who it
-    is with the vehicle's terminal token. Each vehicle runs its own trips.
+    is with the vehicle's terminal token. Each vehicle runs its own trips, only
+    on its own SACCO's routes, and a card is charged that route's fare.
   * Profile: what a login is allowed to see: an operator (one vehicle), a
-    company admin (one company) or an employee (their own account).
+    company admin (one company), a SACCO admin (one SACCO's vehicles and routes)
+    or an employee (their own account).
 
 Money is whole Kenya shillings. The Uno stores a balance in 16 bits and
 refuses anything above 50,000, so the server keeps the same ceiling.
@@ -54,9 +59,27 @@ class Company(models.Model):
         return self.billing == self.Billing.COMPANY
 
 
+class Sacco(models.Model):
+    """A matatu SACCO with an agreement with the platform. Its fares are fixed by
+    that agreement: one fare per route, the same at every hour."""
+    name = models.CharField(max_length=120, unique=True)
+    licence_number = models.CharField(max_length=40, blank=True, help_text='NTSA licence, if known')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'SACCO'
+        verbose_name_plural = 'SACCOs'
+
+    def __str__(self):
+        return self.name
+
+
 class Vehicle(models.Model):
     registration = models.CharField(max_length=20, unique=True, help_text='Number plate, e.g. KDA 123A')
     name = models.CharField(max_length=60, blank=True, help_text='Optional nickname shown to the crew')
+    sacco = models.ForeignKey(
+        Sacco, null=True, blank=True, on_delete=models.PROTECT, related_name='vehicles',
+        help_text="The vehicle runs only this SACCO's routes, at this SACCO's fares")
     terminal_token = models.CharField(
         max_length=64, unique=True, default=new_terminal_token,
         help_text="Secret the vehicle's bridge sends with every call: bridge.py --token ...")
@@ -111,6 +134,7 @@ class Profile(models.Model):
     class Role(models.TextChoices):
         OPERATOR = 'OPERATOR', 'Operator (bus crew)'
         COMPANY_ADMIN = 'COMPANY_ADMIN', 'Company admin'
+        SACCO_ADMIN = 'SACCO_ADMIN', 'SACCO admin'
         EMPLOYEE = 'EMPLOYEE', 'Employee'
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
@@ -121,6 +145,9 @@ class Profile(models.Model):
     company = models.ForeignKey(
         Company, null=True, blank=True, on_delete=models.PROTECT, related_name='admins',
         help_text='Company admins and employees')
+    sacco = models.ForeignKey(
+        Sacco, null=True, blank=True, on_delete=models.PROTECT, related_name='admins',
+        help_text='SACCO admins only')
     must_change_password = models.BooleanField(default=False)
 
     def __str__(self):
@@ -128,11 +155,24 @@ class Profile(models.Model):
 
 
 class Route(models.Model):
-    name = models.CharField(max_length=40, unique=True)
+    """One of a SACCO's routes, with the fare agreed with that SACCO."""
+    sacco = models.ForeignKey(
+        Sacco, null=True, blank=True, on_delete=models.PROTECT, related_name='routes',
+        help_text='The SACCO that runs this route. Its vehicles charge this fare')
+    name = models.CharField(max_length=40)
     fare = models.PositiveIntegerField(validators=[MaxValueValidator(MAX_BALANCE)])
 
+    class Meta:
+        constraints = [
+            # Two SACCOs may both run "CBD-Thika", each at its own fare
+            models.UniqueConstraint(fields=['sacco', 'name'], name='unique_route_name_per_sacco'),
+            models.UniqueConstraint(fields=['name'], condition=models.Q(sacco__isnull=True),
+                                    name='unique_route_name_without_sacco'),
+        ]
+
     def __str__(self):
-        return f'{self.name} (KSh {self.fare})'
+        where = f'{self.sacco.name}: ' if self.sacco_id else ''
+        return f'{where}{self.name} (KSh {self.fare})'
 
 
 class Trip(models.Model):

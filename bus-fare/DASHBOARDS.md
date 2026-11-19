@@ -20,9 +20,10 @@ it on their own dashboard.
 | Who | Dashboard | Sees and does |
 |---|---|---|
 | **Bus crew** (operator) | Live, Trips, Account | **Their own vehicle only.** Each tap: passenger name, paid / already paid / declined, amount. Totals, today's trips, start a new trip, switch route |
+| **SACCO admin** (one per SACCO) | Overview, Fleet, Account | **Their own SACCO only.** Corporate fares and riders today and this month, routes at the agreed fares, corporate clients riding; each bus live (terminal online, route, today's takings) and its reserved seats, which they can set |
 | **Company admin** (one per company) | Overview, Employees, Account | **Their own company only.** Month's travel, unpaid bill (if the company pays), register employees, edit, deactivate, reset password, block or unblock a lost card, give a new card, statements |
 | **Employee** | Wallet, Profile | **Their own card.** Balance, top-up with their payment method, history, details, payment method, password, **block their own lost card** |
-| **Platform** (the team) | Django admin | Creates companies and their admin's login, vehicles and crew logins, routes and fares; records company payments |
+| **Platform** (the team) | Django admin | Creates SACCOs it has agreements with, their routes and agreed fares, their vehicles and crew logins, companies and their admin's login; records company payments |
 
 ### Billing: chosen per company
 
@@ -80,8 +81,8 @@ and **several buses at once with each crew seeing only their vehicle**.
   Each endpoint checks the role and only returns that person's own data.
 - Tap rules, in order: unknown **or deactivated** card → already paid this trip →
   not enough balance (or company over its credit limit) → paid.
-- Fares are set only by the platform in the Django admin; a change reaches
-  every bus running that route.
+- Fares are the ones agreed with each SACCO (see section 7), entered by the
+  platform in the Django admin; a change reaches every bus running that route.
 - `seed_demo` creates demo companies, buses and logins.
 
 **Bridge:** new `--token` option (or `FARE_TERMINAL_TOKEN`). The firmware is
@@ -118,6 +119,36 @@ takes its password and terminal tokens from secrets; `GET /api/health/`.
 
 ---
 
+### 7. SACCOs, fares per route, SACCO dashboard (20 Nov)
+
+The team decided: every SACCO has its own fare system, the fares are fixed by our
+agreement with it (no peak or rain hikes), and the card is charged by the vehicle
+and route it is tapped on. We only work with SACCOs we have agreements with.
+
+- **New table `Sacco`** (name, NTSA licence). Each **route** and each **vehicle**
+  belongs to a SACCO. Route names are unique within a SACCO, so two SACCOs can both
+  run "Marimanti-Chuka", each at its own fare. Migration `0007_saccos`.
+- **A vehicle runs only its own SACCO's routes.** The crew's route list shows only
+  those; starting a trip on another SACCO's route is refused. A vehicle with no
+  running trip carries on with its last route, or starts on its SACCO's first one.
+- **Moving a vehicle to another SACCO** (Django admin) ends its running trip and
+  starts one on the new SACCO's route; the terminal is told the new fare.
+- **SACCO dashboard** (login role *SACCO admin*, created by the platform in the
+  Django admin; demo login `saccoadmin`). **Overview:** corporate fares and riders
+  this month and today, each route with its agreed fare and this month's trips,
+  and the corporate clients riding (riders, trips, money). **Fleet:** each bus with
+  its terminal online or offline, the route it is running, today's takings, and its
+  reserved seats for corporate card holders, which the SACCO sets per bus (the
+  crew sees the same counter). A SACCO admin never sees another SACCO's buses, and
+  looking at the fleet never starts a trip.
+- **Dashboards** show the SACCO: on the crew's header and Trips screen, and on each
+  line of the employee's and the company's statements.
+- `seed_demo` puts the demo routes and buses in **Demo Sacco**, and gives existing
+  routes and vehicles without a SACCO to it (so Railway's data carries over).
+- The firmware is unchanged: it reads the fare from the server as before.
+- Fixed on the way: editing a route's fare in the admin saved only the fare, so a
+  name change made at the same time was lost.
+
 ## API
 
 | Who calls | Endpoint | Does |
@@ -130,6 +161,7 @@ takes its password and terminal tokens from secrets; `GET /api/health/`.
 | Anyone (no login) | `GET /api/health/` | Health check (Railway) |
 | Anyone | `GET /api/auth/me/` · `POST /api/auth/login/` · `POST /api/auth/logout/` · `POST /api/auth/password/` | Logins |
 | Crew | `GET /api/operator/live/` · `GET /api/operator/trips/` · `POST /api/operator/trip/` · `GET /api/routes/` | Own vehicle |
+| SACCO admin | `GET /api/sacco/` · `GET /api/sacco/vehicles/` · `POST /api/sacco/vehicles/<id>/reserved/` | Own SACCO |
 | Company admin | `GET /api/company/` · `GET, POST /api/company/employees/` · `GET, PATCH /api/company/employees/<id>/` · `POST /api/company/employees/<id>/reset-password/` | Own company |
 | Employee | `GET /api/me/` · `POST /api/me/topup/` · `PUT /api/me/payment-method/` · `POST /api/me/card/block/` | Own account |
 
@@ -186,7 +218,8 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 - Session logins for people; secret tokens for bus terminals.
 - Top-ups are **simulated** until a payment provider (M-Pesa) is connected.
 - Settlements are recorded by the platform, not by the company.
-- Fares belong to the platform, because several buses share a route.
+- Each SACCO has its own routes and agreed fares, constant at every hour. A card is
+  charged the fare of the route the vehicle it taps on is running (20 Nov).
 - The server uses Django 6.1 in `server/.venv` (the system Python had 5.1, which
   would have produced wrong migrations).
 

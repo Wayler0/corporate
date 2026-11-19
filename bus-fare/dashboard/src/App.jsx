@@ -10,6 +10,8 @@ import Overview from './screens/company/Overview.jsx'
 import Employees from './screens/company/Employees.jsx'
 import EmployeeDetail from './screens/company/EmployeeDetail.jsx'
 import EmployeeForm from './screens/company/EmployeeForm.jsx'
+import SaccoOverview from './screens/sacco/Overview.jsx'
+import Fleet from './screens/sacco/Fleet.jsx'
 import Wallet from './screens/employee/Wallet.jsx'
 import Profile from './screens/employee/Profile.jsx'
 
@@ -59,6 +61,19 @@ const DASHBOARDS = {
       if (path === '/employees') return <Employees />
       if (path === '/account') return <Account />
       return <Overview />
+    },
+  },
+  // A SACCO's admin: their vehicles, routes and agreed fares
+  SACCO_ADMIN: {
+    tabs: [
+      { path: '/', label: 'Overview', icon: Icon.home },
+      { path: '/fleet', label: 'Fleet', icon: Icon.bus },
+      { path: '/account', label: 'Account', icon: Icon.user },
+    ],
+    screen(path) {
+      if (path === '/fleet') return <Fleet />
+      if (path === '/account') return <Account />
+      return <SaccoOverview />
     },
   },
   // An employee: their own card
