@@ -87,6 +87,10 @@ class NewTripRequestSerializer(serializers.Serializer):
     route = serializers.PrimaryKeyRelatedField(queryset=Route.objects.all(), required=False)
 
 
+class ReservedSeatsSerializer(serializers.Serializer):
+    seats = serializers.IntegerField(min_value=0, max_value=999)
+
+
 class RouteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Route

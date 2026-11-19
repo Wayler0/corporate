@@ -85,6 +85,29 @@ def start_new_trip(vehicle, route=None):
     return trip
 
 
+def reserved_summary(trip):
+    """Reserved-seat boarding counter for the crew screen (bus-fare/BOARDING_DESIGN.md):
+    seats held for corporate card holders this trip, how many have boarded, how many
+    remain. A corporate rider is a passenger who belongs to a company. One PAID tap per
+    card per trip is enforced, so counting PAID corporate taps counts distinct riders."""
+    boarded = Transaction.objects.filter(
+        trip=trip, kind=Transaction.Kind.TAP, result=Transaction.Result.PAID,
+        passenger__company__isnull=False).count()
+    return {'reserved': trip.reserved_seats, 'boarded': boarded,
+            'left': max(0, trip.reserved_seats - boarded)}
+
+
+@transaction.atomic
+def set_reserved_seats(vehicle, seats):
+    """Set the reserved-seat quota on this vehicle's running trip (crew or SACCO)."""
+    if seats < 0 or seats > 999:
+        raise AmountError('Reserved seats must be 0 to 999.')
+    trip = get_current_trip(vehicle)
+    trip.reserved_seats = seats
+    trip.save(update_fields=['reserved_seats'])
+    return trip
+
+
 @transaction.atomic
 def change_fare(route, fare):
     """Set a route's fare (platform staff, from the Django admin). Every vehicle
