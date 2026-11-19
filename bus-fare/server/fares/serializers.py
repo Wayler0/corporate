@@ -1,8 +1,9 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Passenger, Route, Transaction
+from .models import MAX_BALANCE, Passenger, Route, Transaction
 from .services import normalize_card_uid, normalize_phone
 
 
@@ -41,6 +42,22 @@ class TapResponseSerializer(serializers.Serializer):
     result = serializers.CharField()
     fare = serializers.IntegerField()
     balance = serializers.IntegerField()
+
+
+class OfflineTapSerializer(serializers.Serializer):
+    ref = serializers.IntegerField(min_value=0)            # the terminal's own tap number
+    card_uid = CardUidField()
+    fare = serializers.IntegerField(min_value=1, max_value=MAX_BALANCE)
+    trip = serializers.IntegerField(min_value=0)           # server trip the terminal knew (0 = none)
+    offset = serializers.IntegerField(min_value=0, max_value=10000)   # trips started offline since
+    seconds_ago = serializers.IntegerField(min_value=0, required=False, allow_null=True, default=None)
+
+
+class OfflineSyncSerializer(serializers.Serializer):
+    terminal = serializers.RegexField(r'^[0-9A-Fa-f]{4,16}$')   # random ID the terminal made itself
+    trip = serializers.IntegerField(min_value=0)
+    trips_started = serializers.IntegerField(min_value=0, max_value=10000)
+    taps = OfflineTapSerializer(many=True, max_length=100)
 
 
 # ---------- Logins ----------
@@ -120,12 +137,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
     staff_number = serializers.CharField(max_length=30)
     department = serializers.CharField(max_length=60, allow_blank=True, required=False, default='')
     payment_account = serializers.CharField(max_length=40, allow_blank=True, required=False, default='')
+    # Admin: true blocks the card (lost or stolen), false unblocks it. Giving the
+    # employee a new card_uid also unblocks, since the lost card is no longer theirs.
+    card_blocked = serializers.BooleanField(required=False, write_only=True)
 
     class Meta:
         model = Passenger
         fields = ['id', 'name', 'staff_number', 'phone', 'department', 'card_uid',
-                  'payment_method', 'payment_account', 'active', 'balance', 'created_at']
-        read_only_fields = ['id', 'balance', 'created_at']
+                  'payment_method', 'payment_account', 'active', 'card_blocked', 'card_blocked_at',
+                  'balance', 'created_at']
+        read_only_fields = ['id', 'balance', 'card_blocked_at', 'created_at']
 
     def validate_card_uid(self, value):
         taken = Passenger.objects.filter(card_uid=value).exclude(pk=getattr(self.instance, 'pk', None))
@@ -145,6 +166,15 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if get_user_model().objects.filter(username=value).exclude(pk=own_user).exists():
             raise serializers.ValidationError('An account with this phone number already exists.')
         return value
+
+    def update(self, instance, validated_data):
+        blocked = validated_data.pop('card_blocked', None)
+        new_card = validated_data.get('card_uid', instance.card_uid) != instance.card_uid
+        if blocked is True:
+            instance.card_blocked_at = instance.card_blocked_at or timezone.now()
+        elif blocked is False or new_card:
+            instance.card_blocked_at = None
+        return super().update(instance, validated_data)
 
     def validate(self, data):
         method = data.get('payment_method', getattr(self.instance, 'payment_method', ''))

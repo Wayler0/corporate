@@ -1,10 +1,13 @@
 # Dashboards and server: what was built (Kim)
 
-Work on branch **`kim`**, 13–14 Nov 2026. Covers the dashboards (Kim's part) and
+Work on branch **`kim`**, 13–16 Nov 2026. Covers the dashboards (Kim's part) and
 the server changes they needed (PK's area, **for PK to review** before merging
 into `main`). Hardware and firmware are in [`PROGRESS.md`](PROGRESS.md) and
 [`WIRING.md`](WIRING.md); how to run the dashboards is in
-[`dashboard/README.md`](dashboard/README.md).
+[`dashboard/README.md`](dashboard/README.md); the live deployment on Railway in
+[`DEPLOY.md`](DEPLOY.md).
+
+**Live:** https://web-production-9ad597a4.up.railway.app (logins and secrets: see `DEPLOY.md`).
 
 ---
 
@@ -17,8 +20,8 @@ it on their own dashboard.
 | Who | Dashboard | Sees and does |
 |---|---|---|
 | **Bus crew** (operator) | Live, Trips, Account | **Their own vehicle only.** Each tap: passenger name, paid / already paid / declined, amount. Totals, today's trips, start a new trip, switch route |
-| **Company admin** (one per company) | Overview, Employees, Account | **Their own company only.** Month's travel, unpaid bill (if the company pays), register employees, edit, deactivate, reset password, statements |
-| **Employee** | Wallet, Profile | **Their own card.** Balance, top-up with their payment method, history, details, payment method, password |
+| **Company admin** (one per company) | Overview, Employees, Account | **Their own company only.** Month's travel, unpaid bill (if the company pays), register employees, edit, deactivate, reset password, block or unblock a lost card, give a new card, statements |
+| **Employee** | Wallet, Profile | **Their own card.** Balance, top-up with their payment method, history, details, payment method, password, **block their own lost card** |
 | **Platform** (the team) | Django admin | Creates companies and their admin's login, vehicles and crew logins, routes and fares; records company payments |
 
 ### Billing: chosen per company
@@ -87,6 +90,32 @@ unchanged.
 **Dashboards:** one app with a login page; each role lands on its own screens.
 First login with a temporary password asks for a new one.
 
+### 6. Lost cards, offline mode, deployment (16 Nov)
+
+Context: the system is for **corporates**: their employees get **priority boarding**
+(no queueing at the stage), paid by card.
+
+**Lost cards.** An employee blocks their own card from Profile ("Block my card"): it
+is declined on every bus at once, and their login keeps working. Only the company
+admin can unblock it or give a new card (the card may have been copied meanwhile);
+a new card ID clears the block. Taps on a blocked card are recorded as **BLOCKED**
+("LOST CARD" badge) without a fare and without showing the balance, so attempts are
+visible to the employee and the company. The terminal shows "Card blocked /
+Reported lost". Migration `0004_card_blocked`.
+
+**Offline mode** (with Solomon's firmware). The terminal now downloads every active
+card (`GET /api/terminal/cards/`) and keeps it in flash, so every employee works
+offline, blocked cards included. Payments taken offline wait in a queue in flash and
+are sent with `POST /api/terminal/sync/` as soon as the server answers, before
+anything else. Each carries the terminal's own number, so a resend is never charged
+twice; each is dated when the card was tapped; trips started offline are created on
+the server. Before this, offline payments were never recorded and were wiped by the
+next online tap. Migration `0005_offline_sync`.
+
+**Deployment** on Railway with PostgreSQL ([`DEPLOY.md`](DEPLOY.md)). Settings now come
+from environment variables; the server serves the built dashboard; `seed_demo`
+takes its password and terminal tokens from secrets; `GET /api/health/`.
+
 ---
 
 ## API
@@ -96,10 +125,13 @@ First login with a temporary password asks for a new one.
 | Bridge (token) | `POST /api/tap/` | Decide a tap → `RES` line for the Uno |
 | | `GET /api/status/` | This vehicle's trip and fare |
 | | `POST /api/terminal/poll/` | Waiting lines for this vehicle; marks it online |
+| | `GET /api/terminal/cards/` | Every active card for offline mode (plain text) |
+| | `POST /api/terminal/sync/` | Payments taken offline, trips started offline |
+| Anyone (no login) | `GET /api/health/` | Health check (Railway) |
 | Anyone | `GET /api/auth/me/` · `POST /api/auth/login/` · `POST /api/auth/logout/` · `POST /api/auth/password/` | Logins |
 | Crew | `GET /api/operator/live/` · `GET /api/operator/trips/` · `POST /api/operator/trip/` · `GET /api/routes/` | Own vehicle |
 | Company admin | `GET /api/company/` · `GET, POST /api/company/employees/` · `GET, PATCH /api/company/employees/<id>/` · `POST /api/company/employees/<id>/reset-password/` | Own company |
-| Employee | `GET /api/me/` · `POST /api/me/topup/` · `PUT /api/me/payment-method/` | Own account |
+| Employee | `GET /api/me/` · `POST /api/me/topup/` · `PUT /api/me/payment-method/` · `POST /api/me/card/block/` | Own account |
 
 Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 `/api/live/`, `/api/trips/` and `/api/passengers/`.
@@ -108,7 +140,8 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 
 ## Testing
 
-- **Server:** 45 tests: the `WIRING.md` tap sequence, terminal tokens, two buses
+- **Server:** 71 tests (16 Nov), passing on **both SQLite and PostgreSQL**. Since
+  14 Nov: lost cards (10) and offline mode (16). The 14 Nov set (45): the `WIRING.md` tap sequence, terminal tokens, two buses
   at once, company pays and credit limit, crew sees only their own bus, logins
   (phone typed any way), registering employees and duplicates, deactivation,
   password reset, top-ups and payment methods, each role blocked from the
@@ -121,7 +154,19 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
   company admins, registering an employee, that employee's first login,
   password change and top-up. No browser errors.
 
+- **16 Nov on hardware:** a lost card blocked through the employee API was refused
+  by the real ESP32 ("BLOCKED") and worked again after the admin unblocked it.
+  Offline: payments taken with the server stopped reached the server when it came
+  back, dated correctly, with matching balances. On Railway: taps from the ESP32 over
+  the phone hotspot answered in a median 1.2 s.
+
 ### Bugs found and fixed
+- **Every tap failed on PostgreSQL (16 Nov):** the tap locked the passenger row
+  across the optional join to their company, which PostgreSQL refuses (SQLite
+  ignores locks, so the tests never saw it). Found by running the production image
+  against Postgres before deploying; now only the passenger row is locked.
+- **Django tried to shrink every table's id (16 Nov):** the app did not say which id
+  type to use. Set to match the existing migrations.
 - **CSRF:** every save from a logged-in dashboard failed, because the dev proxy
   kept the browser's address as Origin. The proxy now sets Origin to the server
   (also fixes phones on the Wi-Fi).
@@ -152,7 +197,7 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 | Who | What |
 |---|---|
 | **PK** | Review the server redesign on `kim` before merging. Each bus's bridge now needs `--token`. |
-| **Solomon** | No firmware change needed. Offline, the Uno only knows its 4 built-in test cards, so registered employees are declined until the link is back. For company-paid cards the LCD shows "PAID" then the card's own balance. |
+| **Solomon** | The ESP32 firmware now caches every card and queues offline payments (16 Nov). The Uno (`terminal_mvp`) still only knows its 4 built-in cards offline. |
 | **Team** | Real fares; real companies, vehicles and logins instead of the demo ones. |
 
 ## Open items
@@ -162,9 +207,10 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 | PR from `kim` to `main` | After PK's review |
 | Real M-Pesa top-ups | Replaces the simulated payment in `services.top_up` |
 | Update the design canvas | Still shows the first, crew-only screens |
-| Offline cards on the Uno | Firmware could cache registered cards (Solomon) |
 | Company statements to download | e.g. monthly CSV for finance |
-| Deployment | Real server, HTTPS, `DEBUG = False`, secret key |
+| Mark offline payments on the dashboards | The server stores `Transaction.offline`; not shown yet |
+| Priority boarding | Seat quota per departure, door check BOARD / QUEUE |
+| Railway config before 1 Dec 2026 | `railway.json` is being retired (`DEPLOY.md`) |
 
 ## Commits on `kim`
 
@@ -175,3 +221,5 @@ Removed: the old open endpoints `/api/topup/`, `/api/fare/`, `/api/trip/`,
 | `796326c` | Operator dashboard: names and amounts, totals, trips |
 | `6f29ca6` | Server: companies, employees, vehicles and logins |
 | `2373484` | Dashboards for crew, company admins and employees |
+| `526e209` | Lost cards: employees block their own card; only the admin unblocks |
+| `3a68175` | Offline mode: every card on the terminal, offline payments sent to the server |

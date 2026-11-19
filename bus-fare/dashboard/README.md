@@ -24,6 +24,8 @@ sets routes and fares, and records company settlements.
 
 ## Run it
 
+Live on Railway: see [`../DEPLOY.md`](../DEPLOY.md). On the laptop:
+
 ```
 cd bus-fare/server
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # first time only

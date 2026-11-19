@@ -1,0 +1,9 @@
+# Not uploaded by `railway up` (the image only needs server/ and dashboard/)
+.railway-secrets.env
+**/secrets.h
+server/.venv
+server/db.sqlite3
+server/staticfiles
+dashboard/node_modules
+dashboard/dist
+**/__pycache__

@@ -3,10 +3,14 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path('health/', views.HealthView.as_view(), name='health'),
+
     # A vehicle's bridge (Authorization: Terminal <token>)
     path('tap/', views.TapView.as_view(), name='tap'),
     path('status/', views.StatusView.as_view(), name='status'),
     path('terminal/poll/', views.TerminalPollView.as_view(), name='terminal-poll'),
+    path('terminal/cards/', views.TerminalCardsView.as_view(), name='terminal-cards'),
+    path('terminal/sync/', views.TerminalSyncView.as_view(), name='terminal-sync'),
 
     # Logins
     path('auth/me/', views.MeView.as_view(), name='me'),
@@ -30,5 +34,6 @@ urlpatterns = [
     # Employee: their own account
     path('me/', views.MyAccountView.as_view(), name='my-account'),
     path('me/topup/', views.MyTopUpView.as_view(), name='my-topup'),
+    path('me/card/block/', views.MyCardBlockView.as_view(), name='my-card-block'),
     path('me/payment-method/', views.MyPaymentMethodView.as_view(), name='my-payment-method'),
 ]

@@ -2,8 +2,8 @@ import { useState } from 'react'
 import { api, PAYMENT_METHODS, paymentLabel } from '../../api.js'
 import { useAuth } from '../../auth.jsx'
 import { usePoll } from '../../usePoll.js'
-import { localPhone } from '../../format.js'
-import { Field, Message, PageState, ServerProblem } from '../../components/ui.jsx'
+import { localPhone, shortDate } from '../../format.js'
+import { Banner, Field, Message, PageState, ServerProblem } from '../../components/ui.jsx'
 import { PasswordForm } from '../ChangePassword.jsx'
 
 function PaymentMethodForm({ me, onSaved }) {
@@ -58,6 +58,46 @@ function PaymentMethodForm({ me, onSaved }) {
   )
 }
 
+// Lost or stolen card: the employee blocks it at once. Only the company admin
+// can unblock it or give a new card, since it may have been copied meanwhile.
+function LostCard({ me, onBlocked }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState(null)
+
+  if (me.card_blocked_at) {
+    return (
+      <Banner tone="error">
+        Card {me.card_uid} blocked on {shortDate(me.card_blocked_at)}. It is declined on every bus.
+        Ask your company admin for a new card.
+      </Banner>
+    )
+  }
+
+  async function block() {
+    if (!window.confirm(`Block card ${me.card_uid}? It stops working on every bus straight away. `
+      + 'Only your company admin can unblock it or give you a new card.')) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      onBlocked(await api.blockCard())
+    } catch (e) {
+      setMessage({ tone: 'error', text: e.message })
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="card stack pad" aria-labelledby="lost-h">
+      <h2 id="lost-h">Lost or stolen card?</h2>
+      <p className="muted small">Block it now so nobody else can ride on your account. Your login keeps working.</p>
+      <button type="button" className="btn danger" disabled={busy} onClick={block}>
+        {busy ? 'Blocking…' : 'Block my card'}
+      </button>
+      <Message message={message} />
+    </section>
+  )
+}
+
 export default function Profile() {
   const { logout } = useAuth()
   const poll = usePoll(api.account, 60000)
@@ -68,19 +108,21 @@ export default function Profile() {
   const rows = [
     ['Name', me.name], ['Company', me.company], ['Staff number', me.staff_number],
     ['Department', me.department || '—'], ['Phone', localPhone(me.phone)],
-    ['Card', <span key="c" className="mono">{me.card_uid}</span>],
+    ['Card', <span key="c" className="mono">{me.card_uid}{me.card_blocked_at ? ' (blocked)' : ''}</span>],
   ]
   return (
     <>
       {header}
       <main className="content">
         <ServerProblem poll={poll} />
+        {me.card_blocked_at && <LostCard me={me} />}
         <section className="card list" aria-label="Your details">
           {rows.map(([label, value]) => (
             <div key={label} className="item"><span className="grow muted">{label}</span><strong className="right">{value}</strong></div>
           ))}
         </section>
-        <p className="muted small note">Wrong details or a lost card? Ask your company admin.</p>
+        <p className="muted small note">Wrong details? Ask your company admin.</p>
+        {!me.card_blocked_at && <LostCard me={me} onBlocked={() => poll.refresh()} />}
         {!me.company_pays && <PaymentMethodForm me={me} onSaved={() => poll.refresh()} />}
         <PasswordForm />
         <button type="button" className="btn secondary" onClick={logout}>Log out</button>

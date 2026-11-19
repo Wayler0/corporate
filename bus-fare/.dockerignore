@@ -1,0 +1,11 @@
+# Only the server and the dashboard go into the image
+*
+!server
+!dashboard
+server/.venv
+server/db.sqlite3
+server/staticfiles
+dashboard/node_modules
+dashboard/dist
+**/__pycache__
+**/*.pyc

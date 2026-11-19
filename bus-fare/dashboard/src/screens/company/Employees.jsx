@@ -48,6 +48,7 @@ export default function Employees() {
                   </span>
                   <span className="end">
                     {!e.active ? <span className="badge badge-unknown small-badge">INACTIVE</span>
+                      : e.card_blocked_at ? <span className="badge badge-blocked small-badge">CARD BLOCKED</span>
                       : employeesPay && <span className="amount num">{money(e.balance)}</span>}
                   </span>
                   <Icon.chevron className="muted" />

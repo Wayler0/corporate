@@ -2,6 +2,7 @@
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import models, transaction
@@ -26,7 +27,7 @@ class NotAllowedError(Exception):
 
 @dataclass
 class TapDecision:
-    result: str   # PAID, REPEAT, LOW or UNKNOWN
+    result: str   # PAID, REPEAT, LOW, UNKNOWN or BLOCKED
     fare: int
     balance: int
 
@@ -106,7 +107,8 @@ def company_outstanding(company):
 @transaction.atomic
 def process_tap(vehicle, card_uid):
     """Approve or refuse one tap on one vehicle, and record it. Checked in this order:
-    UNKNOWN (or deactivated) card -> REPEAT (already paid this trip) -> LOW -> PAID.
+    UNKNOWN (or deactivated) card -> BLOCKED (reported lost) -> REPEAT (already paid
+    this trip) -> LOW -> PAID.
     LOW means: not enough on the card, or (company pays) over the company's credit limit."""
     card_uid = normalize_card_uid(card_uid)
     trip = get_current_trip(vehicle)
@@ -121,10 +123,14 @@ def process_tap(vehicle, card_uid):
 
     # select_for_update locks the passenger's row so two taps at the same
     # moment cannot both take the fare (PostgreSQL/MySQL; SQLite locks the file).
-    passenger = (Passenger.objects.select_for_update().select_related('company')
+    passenger = (Passenger.objects.select_for_update(of=('self',)).select_related('company')
                  .filter(card_uid=card_uid).first())
     if passenger is None or not passenger.active:
         return record(Transaction.Result.UNKNOWN, passenger)
+    if passenger.card_blocked_at is not None:
+        # Recorded, so the employee and their company see that someone tried the
+        # lost card. The balance is not shown to whoever is holding it.
+        return record(Transaction.Result.BLOCKED, passenger)
 
     already_paid = Transaction.objects.filter(
         trip=trip, passenger=passenger, result=Transaction.Result.PAID).exists()
@@ -147,6 +153,117 @@ def process_tap(vehicle, card_uid):
     passenger.save(update_fields=['balance'])
     return record(Transaction.Result.PAID, passenger, amount=fare, balance=passenger.balance,
                   paid_by=Transaction.PaidBy.CARD)
+
+
+# ---------- Offline mode ----------
+OFFLINE_MAX_AGE = timedelta(days=7)   # an older "seconds ago" is treated as this old
+
+
+def terminal_cards(vehicle):
+    """Everything a terminal needs to decide taps by itself when the server is out
+    of reach, as plain text (easy for the ESP32 to read line by line):
+
+        TRIP 12 FARE 50 Campus shuttle
+        E5734107 450 -
+        008DEC53 450 P
+        A1B2C3D4 200 C
+
+    One line per active card: card ID, the card's own balance, and flags:
+    P already paid this trip, C the company pays, X the company is over its
+    credit limit, B blocked (lost or stolen), - none. Deactivated cards are left out."""
+    trip = get_current_trip(vehicle)
+    fare = trip.route.fare
+    paid = set(Transaction.objects.filter(trip=trip, result=Transaction.Result.PAID)
+               .values_list('passenger_id', flat=True))
+    over_limit = {c.pk for c in Company.objects.filter(billing=Company.Billing.COMPANY, credit_limit__gt=0)
+                  if company_outstanding(c) + fare > c.credit_limit}
+    lines = [f'TRIP {trip.pk} FARE {fare} {trip.route.name}']
+    for p in Passenger.objects.filter(active=True).select_related('company').order_by('pk'):
+        flags = ''
+        if p.pk in paid:
+            flags += 'P'
+        if p.company is not None and p.company.company_pays:
+            flags += 'C'
+            if p.company_id in over_limit:
+                flags += 'X'
+        if p.card_blocked_at is not None:
+            flags += 'B'
+        lines.append(f'{p.card_uid} {p.balance} {flags or "-"}')
+    return '\n'.join(lines) + '\n'
+
+
+def _offline_trip(vehicle, terminal_id, base_id, offset):
+    """The trip an offline tap belongs to. offset 0: the server trip the terminal
+    knew (base_id). offset n: the n-th trip the terminal started by itself after
+    that one, created here (already ended) the first time it is mentioned."""
+    base = Trip.objects.filter(pk=base_id, vehicle=vehicle).select_related('route').first() if base_id else None
+    if offset == 0:
+        return base or get_current_trip(vehicle)
+    route = base.route if base else get_current_trip(vehicle).route
+    trip, _ = Trip.objects.get_or_create(
+        vehicle=vehicle, terminal_ref=f'{terminal_id}:{base_id}+{offset}',
+        defaults={'route': route, 'ended_at': timezone.now()})
+    return trip
+
+
+@transaction.atomic
+def sync_offline(vehicle, terminal_id, trip_id, trips_started, taps):
+    """Record the payments a terminal took while offline, and the trips it started.
+
+    The passenger has already ridden, so the terminal's decision stands; this only
+    puts the money and the record right:
+      * a card deactivated since, or blocked before the tap  -> UNKNOWN / BLOCKED, no fare
+      * already paid on that trip (e.g. online, then offline) -> REPEAT, no fare
+      * the company pays                                     -> billed to the company
+      * otherwise the fare comes off the card; if the card was spent elsewhere in
+        the meantime, what is left is taken (amount < fare shows the shortfall)
+    A tap whose terminal_ref was recorded before is skipped, so resending is safe.
+
+    If the terminal started trips offline and the crew has not started a newer one
+    on the server, the terminal's latest trip becomes this vehicle's running trip.
+    Returns the running trip."""
+    now = timezone.now()
+    R = Transaction.Result
+    for tap in taps:
+        ref = f'{terminal_id}:{tap["ref"]}'
+        if Transaction.objects.filter(vehicle=vehicle, terminal_ref=ref).exists():
+            continue
+        trip = _offline_trip(vehicle, terminal_id, tap['trip'], tap['offset'])
+        age = tap.get('seconds_ago')
+        at = now - min(timedelta(seconds=age), OFFLINE_MAX_AGE) if age is not None else now
+        uid = normalize_card_uid(tap['card_uid'])
+        passenger = (Passenger.objects.select_for_update(of=('self',)).select_related('company')
+                     .filter(card_uid=uid).first())
+
+        def record(result, amount=0, balance=0, paid_by='', company=None):
+            t = Transaction.objects.create(
+                kind=Transaction.Kind.TAP, result=result, card_uid=uid, passenger=passenger, trip=trip,
+                vehicle=vehicle, amount=amount, balance_after=balance, paid_by=paid_by, company=company,
+                offline=True, terminal_ref=ref)
+            Transaction.objects.filter(pk=t.pk).update(created_at=at)   # when it really happened
+
+        if passenger is None or not passenger.active:
+            record(R.UNKNOWN)
+        elif passenger.card_blocked_at is not None and passenger.card_blocked_at <= at:
+            record(R.BLOCKED)
+        elif Transaction.objects.filter(trip=trip, passenger=passenger, result=R.PAID).exists():
+            record(R.REPEAT, balance=passenger.balance)
+        elif passenger.company is not None and passenger.company.company_pays:
+            record(R.PAID, amount=tap['fare'], balance=passenger.balance,
+                   paid_by=Transaction.PaidBy.COMPANY, company=passenger.company)
+        else:
+            take = min(tap['fare'], passenger.balance)
+            passenger.balance -= take
+            passenger.save(update_fields=['balance'])
+            record(R.PAID, amount=take, balance=passenger.balance, paid_by=Transaction.PaidBy.CARD)
+
+    running = running_trip(vehicle)
+    if trips_started and (running is None or running.pk == trip_id):
+        latest = _offline_trip(vehicle, terminal_id, trip_id, trips_started)
+        Trip.objects.filter(vehicle=vehicle, ended_at__isnull=True).exclude(pk=latest.pk).update(ended_at=now)
+        Trip.objects.filter(pk=latest.pk).update(ended_at=None)
+        running = latest
+    return running or get_current_trip(vehicle)
 
 
 # ---------- Messages for a terminal ----------
@@ -175,12 +292,23 @@ def terminal_status(vehicle):
     return {'online': online, 'last_seen': last}
 
 
+# ---------- Lost cards ----------
+@transaction.atomic
+def block_card(passenger):
+    """Stop this card working on every vehicle, straight away. Only the card:
+    the employee can still log in. Blocking twice keeps the first time."""
+    updated = Passenger.objects.filter(pk=passenger.pk, card_blocked_at__isnull=True).update(
+        card_blocked_at=timezone.now())
+    passenger.refresh_from_db(fields=['card_blocked_at'])
+    return updated == 1
+
+
 # ---------- Top-up (employee pays billing) ----------
 @transaction.atomic
 def top_up(passenger, amount, method):
     """Add money to an employee's card. DEMO: no payment provider is connected
     yet, so the payment always succeeds. Real M-Pesa goes here later."""
-    passenger = Passenger.objects.select_for_update().select_related('company').get(pk=passenger.pk)
+    passenger = Passenger.objects.select_for_update(of=('self',)).select_related('company').get(pk=passenger.pk)
     if passenger.company is not None and passenger.company.company_pays:
         raise NotAllowedError(f'{passenger.company.name} pays your fares, so there is nothing to top up.')
     if not method:
@@ -204,7 +332,7 @@ def tap_totals(taps):
         collected=models.Sum('amount', filter=models.Q(result=R.PAID), default=0),
         paid=models.Count('id', filter=models.Q(result=R.PAID)),
         repeat=models.Count('id', filter=models.Q(result=R.REPEAT)),
-        refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN])),
+        refused=models.Count('id', filter=models.Q(result__in=[R.LOW, R.UNKNOWN, R.BLOCKED])),
     )
 
 

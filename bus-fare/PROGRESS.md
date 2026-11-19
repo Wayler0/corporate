@@ -5,14 +5,22 @@ tap-to-pay ticketing. Built on an Arduino Uno for a competition demo.
 
 Wiring and testing instructions: [`WIRING.md`](WIRING.md).
 Dashboards and server (logins, companies, vehicles): [`DASHBOARDS.md`](DASHBOARDS.md).
+Live deployment on Railway: [`DEPLOY.md`](DEPLOY.md), **https://web-production-9ad597a4.up.railway.app**.
+
+**Who it is for:** corporates. Their employees tap a card and get **priority
+boarding** (no queueing at the stage); the employee or the company pays.
 
 ---
 
-## Where we are (14 Nov 2026)
+## Where we are (16 Nov 2026)
 
 | Part | Status |
 |---|---|
+| **Server + dashboards on Railway** | ✅ **Live**, PostgreSQL, HTTPS; ESP32 taps over the internet in ~1.2 s |
 | **Wireless terminal (ESP32 + Wi-Fi)** | ✅ **Tested end to end with PK's server** |
+| Offline mode with every card, offline payments sent later | ✅ Tested on hardware (16 Nov) |
+| Lost card: employee blocks it, terminal refuses it | ✅ Tested on hardware (16 Nov) |
+| Payment sounds (one tune per result) | ✅ Uploaded; to be listened to on the piezo |
 | Card reader (RC522) | ✅ Working, header soldered |
 | LCD 16×2 with I2C backpack | ✅ Working |
 | RGB LED (green/yellow/red) | ✅ Working |
@@ -22,7 +30,7 @@ Dashboards and server (logins, companies, vehicles): [`DASHBOARDS.md`](DASHBOARD
 | Automatic fallback when the server goes away | ✅ Tested |
 | GSM module (SIM800C) | ✅ Answers commands; no SIM, no antenna yet |
 | Real backend server (PK) | ✅ Merged; ESP32 taps, polls and status work against it |
-| Live dashboard (Kim) | ✅ Merged (see `DASHBOARDS.md`); not yet tried with live taps |
+| Live dashboard (Kim) | ✅ Merged (see `DASHBOARDS.md`); deployed; not yet watched during live taps |
 | Battery power (LiPo + TP4056) | ⏳ Needs an MT3608 5 V boost board; use a power bank or charger meanwhile |
 | Neat build (box or flat board) | ⏳ Planned, see `WIRING.md` section 8 |
 
@@ -147,14 +155,48 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
 - Found and fixed: opening the USB port could hold the ESP32 in reset; the
   script now restarts it cleanly. Uploads at 921600 baud failed once; 115200 works.
 
+### 16 Nov: Sounds, lost cards, offline mode, Railway
+- **Payment sounds:** one tune per result (paid, already paid, low balance, unknown,
+  top-up, start-up) in one editable table; `sound all` plays them. The note names
+  `A6`/`A7` clashed with the ESP32's pin names and broke the build: renamed `N_A6` ...
+- Set up `arduino-cli` on the laptop (ESP32 core 2.0.17, MFRC522 library, pyserial).
+  Uploads at 921600 baud fail half way; **115200 works**.
+- **Research on the matatu industry** (cashless failures since BebaPay, the daily
+  target system, fares that change with peak hours and rain, NTSA and SACCOs).
+  Conclusion: aim at **corporates with priority boarding**, not all commuters.
+- **Lost cards:** an employee blocks their own card from the dashboard; refused on
+  every bus at once; only the company admin unblocks or gives a new card.
+- **Offline mode fixed:** offline payments were never sent to the server and the next
+  online tap wiped them; offline only the 4 demo cards worked. Now the terminal keeps
+  every card in flash and sends offline payments when the server is back. Tested:
+  server stopped, taps and a new trip offline, server restarted → recorded, dated,
+  balances matching.
+- **Deployed on Railway** (server + dashboards + PostgreSQL). Testing the production
+  image against PostgreSQL first found that **every tap would have failed** there
+  (a row lock SQLite ignores); fixed. Demo logins and terminal tokens use secrets, not
+  the published defaults. The ESP32 now talks to Railway over HTTPS from the phone
+  hotspot; reusing one connection cut a tap from 4–5 s to ~1.2 s.
+
+### 19 Nov: one terminal firmware again
+- Merged `main` (Kim's sounds, lost cards, offline sync, Railway/HTTPS) with the
+  `wayler` branch (Wi-Fi/server/token over the cable, scrolling LCD lines).
+  Kim's server code is the base; the server address and token now come from the
+  settings saved over the cable, and the HTTPS timeouts follow the saved address,
+  so `server https://...` switches between the laptop and Railway without a new upload.
+- Server lines still cannot change the Wi-Fi settings; `trip` from the dashboard
+  starts a server trip as before.
+
 ---
 
 ## Open items
 
 | Item | Who | Notes |
 |---|---|---|
-| Dashboard tried with live taps from the ESP32 | Kim | |
-| Start the server reliably for the demo (not from a dev session) | PK | needs the laptop's IP in `ALLOWED_HOSTS` and `runserver 0.0.0.0:8000` |
+| Dashboard watched during live taps from the ESP32 | Kim | now possible on the Railway address |
+| Listen to the payment sounds on the piezo; adjust notes | Solomon / Kim | `sound all` |
+| Railway config before **1 Dec 2026** | Kim | `railway config migrate` (see `DEPLOY.md`) |
+| Priority boarding: seat quota per departure, door check | Team | from the industry research |
+| Stop the Railway project after the demo (billed by use) | Kim | |
 | MT3608 5 V boost board for the battery | Solomon | multimeter needed to set 5.0 V |
 | Protect `main` on GitHub | Solomon | Settings → Branches |
 | Neat build: flat board or box | Solomon | `WIRING.md` section 8; needs ~20 longer jumpers |
@@ -163,4 +205,4 @@ server over Wi-Fi and carries on by itself when the server or Wi-Fi is down.
 | GSM antenna (IPEX/u.FL) | Kim asked | |
 | SIM card + separate 5V 2A supply for GSM | Later | Roadmap; SIM800 is 2G only |
 | Pin in PWX → Uno pin 4 (auto power-on for GSM) | Later | |
-| Competition date | Team | Not yet known |
+| Competition | Team | Machakos University hackfest; judging 19 Nov 2026 |

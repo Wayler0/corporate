@@ -353,3 +353,206 @@ class EmployeeTests(Base):
         self.tap('008DEC53')
         data = self.person('0700000001').get('/api/me/').json()
         self.assertEqual(data['transactions'], [])
+
+
+class LostCardTests(Base):
+    """An employee blocks their own lost card; only the company admin brings it back."""
+
+    def block(self, username='0700000001'):
+        return self.person(username).post('/api/me/card/block/')
+
+    def test_employee_blocks_own_card(self):
+        response = self.block()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()['card_blocked_at'])
+        # Declined on every vehicle, no fare taken, balance not shown to whoever holds it
+        self.assertEqual(self.tap('E5734107').json(), {'result': 'BLOCKED', 'fare': 50, 'balance': 0})
+        self.assertEqual(self.tap('E5734107', BUS2).json()['result'], 'BLOCKED')
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 500)
+
+    def test_login_keeps_working_and_attempts_are_visible(self):
+        self.block()
+        self.tap('E5734107')
+        me = self.person('0700000001').get('/api/me/').json()
+        self.assertEqual(me['transactions'][0]['result'], 'BLOCKED')
+        self.assertEqual(self.person('staffadmin').get('/api/company/').json()['month']['declined'], 1)
+
+    def test_blocking_twice_keeps_the_first_time(self):
+        first = self.block().json()['card_blocked_at']
+        self.assertEqual(self.block().json()['card_blocked_at'], first)
+
+    def test_blocks_only_their_own_card(self):
+        self.block('0700000001')
+        self.assertEqual(self.tap('008DEC53').json()['result'], 'PAID')
+
+    def test_others_cannot_use_the_endpoint(self):
+        self.assertEqual(APIClient().post('/api/me/card/block/').status_code, 403)
+        self.assertEqual(self.person('staffadmin').post('/api/me/card/block/').status_code, 403)
+        self.assertEqual(self.person('crew1').post('/api/me/card/block/').status_code, 403)
+
+    def test_employee_cannot_unblock_through_their_account(self):
+        self.block()
+        me = self.person('0700000001')
+        self.assertEqual(me.patch('/api/me/', {'card_blocked_at': None}, format='json').status_code, 405)
+        self.assertEqual(self.tap('E5734107').json()['result'], 'BLOCKED')
+
+    def test_admin_unblocks(self):
+        self.block()
+        white = Passenger.objects.get(card_uid='E5734107')
+        data = self.person('staffadmin').patch(
+            f'/api/company/employees/{white.pk}/', {'card_blocked': False}, format='json').json()
+        self.assertIsNone(data['card_blocked_at'])
+        self.assertEqual(self.tap('E5734107').json()['result'], 'PAID')
+
+    def test_new_card_replaces_the_lost_one(self):
+        self.block()
+        white = Passenger.objects.get(card_uid='E5734107')
+        self.person('staffadmin').patch(
+            f'/api/company/employees/{white.pk}/', {'card_uid': 'AABBCCDD'}, format='json')
+        self.assertEqual(self.tap('AABBCCDD').json(), {'result': 'PAID', 'fare': 50, 'balance': 450})
+        self.assertEqual(self.tap('E5734107').json()['result'], 'UNKNOWN')   # the lost card is nobody's now
+
+    def test_admin_can_block_too(self):
+        white = Passenger.objects.get(card_uid='E5734107')
+        self.person('staffadmin').patch(f'/api/company/employees/{white.pk}/', {'card_blocked': True}, format='json')
+        self.assertEqual(self.tap('E5734107').json()['result'], 'BLOCKED')
+
+    def test_admin_of_another_company_cannot_touch_it(self):
+        kim = Passenger.objects.get(card_uid='A1B2C3D4')
+        response = self.person('staffadmin').patch(
+            f'/api/company/employees/{kim.pk}/', {'card_blocked': True}, format='json')
+        self.assertEqual(response.status_code, 404)
+
+
+class OfflineModeTests(Base):
+    """The terminal's card list, and payments it took offline sent later."""
+    TERMINAL = 'A1B2C3D4'
+
+    def cards(self, token=BUS1):
+        response = self.terminal(token).get('/api/terminal/cards/')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response['Content-Type'].startswith('text/plain'))
+        lines = response.content.decode().splitlines()
+        return lines[0], {uid: (int(bal), flags) for uid, bal, flags in (l.split(' ') for l in lines[1:])}
+
+    def trip_id(self):
+        return get_current_trip(self.bus1).pk
+
+    def sync(self, taps, trips_started=0, trip=None, token=BUS1):
+        trip = self.trip_id() if trip is None else trip
+        return self.terminal(token).post('/api/terminal/sync/', {
+            'terminal': self.TERMINAL, 'trip': trip, 'trips_started': trips_started, 'taps': taps}, format='json')
+
+    def offline_tap(self, ref, uid, offset=0, fare=50, trip=None, seconds_ago=60):
+        return {'ref': ref, 'card_uid': uid, 'fare': fare, 'trip': self.trip_id() if trip is None else trip,
+                'offset': offset, 'seconds_ago': seconds_ago}
+
+    # ----- card list -----
+    def test_card_list(self):
+        self.tap('E5734107')
+        Passenger.objects.filter(card_uid='11223344').update(card_blocked_at=timezone.now())
+        Passenger.objects.filter(card_uid='008DEC53').update(active=False)
+        header, cards = self.cards()
+        self.assertEqual(header, f'TRIP {self.trip_id()} FARE 50 Campus shuttle')
+        self.assertEqual(cards['E5734107'], (450, 'P'))     # paid this trip
+        self.assertEqual(cards['11223344'], (30, 'B'))      # blocked
+        self.assertEqual(cards['A1B2C3D4'][1], 'C')         # company pays
+        self.assertNotIn('008DEC53', cards)                 # deactivated: left out
+
+    def test_card_list_marks_company_over_limit(self):
+        Company.objects.filter(billing=Company.Billing.COMPANY).update(credit_limit=40)
+        self.assertEqual(self.cards()[1]['A1B2C3D4'][1], 'CX')
+
+    def test_card_list_needs_terminal_token(self):
+        self.assertEqual(APIClient().get('/api/terminal/cards/').status_code, 401)
+        self.assertEqual(self.person('crew1').get('/api/terminal/cards/').status_code, 401)   # a login is not a terminal
+
+    # ----- sync -----
+    def test_offline_payment_is_charged_and_dated(self):
+        response = self.sync([self.offline_tap(1, 'E5734107', seconds_ago=600)])
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 450)
+        t = Transaction.objects.get(card_uid='E5734107')
+        self.assertEqual((t.result, t.amount, t.offline), ('PAID', 50, True))
+        self.assertAlmostEqual((timezone.now() - t.created_at).total_seconds(), 600, delta=5)
+
+    def test_resending_is_harmless(self):
+        taps = [self.offline_tap(1, 'E5734107'), self.offline_tap(2, '008DEC53')]
+        self.sync(taps)
+        self.sync(taps)
+        self.assertEqual(Transaction.objects.filter(offline=True).count(), 2)
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 450)
+
+    def test_same_ref_from_another_terminal_is_a_different_tap(self):
+        self.sync([self.offline_tap(1, 'E5734107')])
+        self.TERMINAL = 'FFFF0000'
+        self.sync([self.offline_tap(1, '008DEC53')])
+        self.assertEqual(Transaction.objects.filter(offline=True).count(), 2)
+
+    def test_paid_online_then_offline_on_the_same_trip_is_not_charged_twice(self):
+        self.tap('E5734107')
+        self.sync([self.offline_tap(1, 'E5734107')])
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 450)
+        self.assertEqual(Transaction.objects.get(offline=True).result, 'REPEAT')
+
+    def test_spent_elsewhere_meanwhile_takes_what_is_left(self):
+        Passenger.objects.filter(card_uid='11223344').update(balance=20)
+        self.sync([self.offline_tap(1, '11223344')])
+        t = Transaction.objects.get(offline=True)
+        self.assertEqual((t.result, t.amount, t.balance_after), ('PAID', 20, 0))
+
+    def test_company_pays_offline_ignores_the_limit(self):
+        Company.objects.filter(billing=Company.Billing.COMPANY).update(credit_limit=10)
+        self.sync([self.offline_tap(1, 'A1B2C3D4')])
+        t = Transaction.objects.get(offline=True)
+        self.assertEqual((t.result, t.paid_by, t.amount), ('PAID', 'COMPANY', 50))
+
+    def test_card_blocked_before_the_tap_is_not_charged(self):
+        Passenger.objects.filter(card_uid='E5734107').update(card_blocked_at=timezone.now() - timedelta(hours=1))
+        self.sync([self.offline_tap(1, 'E5734107', seconds_ago=60)])
+        self.assertEqual(Transaction.objects.get(offline=True).result, 'BLOCKED')
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 500)
+
+    def test_card_blocked_after_the_tap_is_charged(self):
+        Passenger.objects.filter(card_uid='E5734107').update(card_blocked_at=timezone.now() - timedelta(minutes=1))
+        self.sync([self.offline_tap(1, 'E5734107', seconds_ago=3600)])
+        self.assertEqual(Transaction.objects.get(offline=True).result, 'PAID')
+
+    def test_unknown_card_is_recorded_without_a_fare(self):
+        self.sync([self.offline_tap(1, '99999999')])
+        self.assertEqual(Transaction.objects.get(offline=True).result, 'UNKNOWN')
+
+    def test_trips_started_offline(self):
+        base = self.trip_id()
+        self.tap('E5734107')                                   # paid online on the base trip
+        response = self.sync([
+            self.offline_tap(1, 'E5734107', offset=1, trip=base),   # new trip 1: pays again
+            self.offline_tap(2, 'E5734107', offset=2, trip=base),   # new trip 2: pays again
+        ], trips_started=2, trip=base).json()
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 350)
+        running = get_current_trip(self.bus1)
+        self.assertEqual(response['trip'], running.pk)
+        self.assertNotEqual(running.pk, base)
+        self.assertEqual(Trip.objects.filter(vehicle=self.bus1, ended_at__isnull=True).count(), 1)
+        self.assertEqual(Trip.objects.filter(vehicle=self.bus1).count(), 3)
+        # Online again on the trip the terminal is on: the same card is already paid
+        self.assertEqual(self.tap('E5734107').json()['result'], 'REPEAT')
+
+    def test_crew_started_a_trip_on_the_server_meanwhile(self):
+        base = self.trip_id()
+        newer = self.person('crew1').post('/api/operator/trip/', {}, format='json').json()['trip']
+        response = self.sync([self.offline_tap(1, 'E5734107', offset=1, trip=base)], trips_started=1, trip=base)
+        self.assertEqual(response.json()['trip'], newer)        # the server's trip wins
+        self.assertEqual(Transaction.objects.get(offline=True).result, 'PAID')
+
+    def test_sync_is_per_vehicle(self):
+        self.sync([self.offline_tap(1, 'E5734107')], token=BUS2, trip=0)
+        t = Transaction.objects.get(offline=True)
+        self.assertEqual(t.vehicle, self.bus2)
+        self.assertEqual(t.trip.vehicle, self.bus2)
+
+    def test_bad_requests(self):
+        self.assertEqual(self.sync([{'ref': 1, 'card_uid': 'xyz', 'fare': 50, 'trip': 0, 'offset': 0}]).status_code, 400)
+        self.assertEqual(self.sync([self.offline_tap(1, 'E5734107', fare=0)]).status_code, 400)
+        self.assertEqual(self.sync([self.offline_tap(i, 'E5734107') for i in range(101)]).status_code, 400)
+        self.assertEqual(APIClient().post('/api/terminal/sync/', {}, format='json').status_code, 401)

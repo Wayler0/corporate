@@ -1,1 +1,4 @@
 secrets.h
+
+# Deployment secrets (bus-fare/DEPLOY.md)
+.railway-secrets.env

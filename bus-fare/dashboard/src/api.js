@@ -89,6 +89,7 @@ export const api = {
   // employee
   account: () => get('/me/'),
   topUp: (amount) => post('/me/topup/', { amount }),
+  blockCard: () => post('/me/card/block/'),
   setPaymentMethod: (payment_method, payment_account) =>
     request('PUT', '/me/payment-method/', { payment_method, payment_account }),
 }

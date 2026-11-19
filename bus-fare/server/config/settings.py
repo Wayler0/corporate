@@ -20,13 +20,33 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
+# Settings come from environment variables in production (see bus-fare/DEPLOY.md).
+# With none set, this is the laptop development set-up: debug on, SQLite.
+DEBUG = os.environ.get('DJANGO_DEBUG', '1') == '1'
+
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-only-change-me')
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise RuntimeError('Set DJANGO_SECRET_KEY (production runs with DJANGO_DEBUG=0).')
+    SECRET_KEY = 'dev-only-change-me'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Extra addresses (e.g. this laptop's Wi-Fi IP so the ESP32 terminal can reach it),
+# comma-separated:  ALLOWED_HOSTS=10.170.92.82 python manage.py runserver 0.0.0.0:8000
+ALLOWED_HOSTS = ['localhost', '127.0.0.1'] + [
+    h.strip() for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h.strip()
+]
+# Railway sets the public address of the service by itself
+RAILWAY_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+if RAILWAY_DOMAIN:
+    ALLOWED_HOSTS.append(RAILWAY_DOMAIN)
+CSRF_TRUSTED_ORIGINS = [f'https://{h}' for h in ALLOWED_HOSTS if h not in ('localhost', '127.0.0.1')]
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+if not DEBUG:
+    # Railway ends HTTPS at its edge and passes the request on as plain HTTP
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 
 # Application definition
@@ -44,6 +64,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",   # static files and the built dashboard
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -75,12 +96,17 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+# DATABASE_URL (Railway's PostgreSQL) in production, SQLite on the laptop
+if os.environ.get('DATABASE_URL'):
+    import dj_database_url
+    DATABASES = {'default': dj_database_url.config(conn_max_age=60, conn_health_checks=True)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
 
 
 # Password validation
@@ -118,6 +144,17 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"   # collectstatic puts the Django admin's files here
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+}
+# The built dashboard (bus-fare/dashboard/dist) is served at the site's root,
+# so the dashboard and /api/ share one address. Set by the Dockerfile.
+DASHBOARD_DIR = os.environ.get('DASHBOARD_DIR', '')
+if DASHBOARD_DIR:
+    WHITENOISE_ROOT = DASHBOARD_DIR
+    WHITENOISE_INDEX_FILE = True
 
 # The dashboards log in with Django sessions (same address as the API through the
 # Vite proxy). Vehicle bridges use "Authorization: Terminal <token>" instead.
@@ -126,6 +163,15 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
 }
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 14   # stay logged in for two weeks
+
+# Errors go to the console, so they show up in Railway's logs (with debug off,
+# Django would otherwise only email them).
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {"django": {"handlers": ["console"], "level": os.environ.get("DJANGO_LOG_LEVEL", "WARNING")}},
+}
 
 
 # Email

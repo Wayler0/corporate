@@ -530,8 +530,33 @@ From the terminal the board options must be spelled out:
 ```
 arduino --upload --port /dev/ttyUSB0 --board esp32:esp32:esp32:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=default,DebugLevel=none,PSRAM=disabled,LoopCore=1,EventsCore=1,EraseFlash=none bus-fare/terminal_esp32/terminal_esp32.ino
 ```
-Serial Monitor: **115200** baud. Commands: `status`, `list`, `trip`, a card ID to
-simulate a tap, `help`.
+With `arduino-cli` (needs the MFRC522 library: `arduino-cli lib install MFRC522`):
+```
+arduino-cli compile --fqbn esp32:esp32:esp32 bus-fare/terminal_esp32
+arduino-cli upload --fqbn esp32:esp32:esp32:UploadSpeed=115200 -p /dev/ttyUSB0 bus-fare/terminal_esp32
+```
+On this laptop 921600 baud fails half way ("chip stopped responding"); 115200 works.
+If it still fails, run the upload again.
+
+Serial Monitor: **115200** baud. Commands: `status`, `list`, `trip`, `sync`, a card
+ID to simulate a tap, `help`.
+
+### Payment sounds
+Each result plays its own tune on the piezo. The tunes sit in one table near the
+top of `terminal_esp32.ino` (section **Sounds**), as `{frequency Hz, length ms}`
+notes, with `0` meaning a pause. Edit them, upload, and try each one from the Serial
+Monitor with `sound paid`, `sound low` or `sound all` (no card needed).
+
+| Sound | When | Default tune |
+|---|---|---|
+| `paid` | payment went through | rising chime C-E-G |
+| `repeat` | already paid this trip | two beeps |
+| `low` | failed: balance too low | falling "uh-oh" + long low tone |
+| `unknown` | failed: card not registered or deactivated | triple low buzz |
+| `topup` | a top-up message arrives from the server | quick rising run |
+| `startup` | terminal ready after switch-on | two-note chirp |
+
+`SOUND_ON = false` mutes the terminal (LED and LCD still work).
 
 ### What it does
 | Situation | LCD | Behaviour |
@@ -540,6 +565,29 @@ simulate a tap, `help`.
 | Server or Wi-Fi gone | "Server offline", no `*` | decides alone from its saved copy |
 | Server back | "Server linked" | reconnects by itself within ~5 s |
 | Asking the server | "Checking..." + 🔵 | answer within 2 s, else offline decision |
+| Lost card (blocked by its owner) | "Card blocked / Reported lost" | refused, online and offline |
+
+### Offline mode
+While online the terminal downloads **every active card** every 30 s
+(`GET /api/terminal/cards/`): balance, blocked, company pays, already paid this trip.
+The list is kept in flash, so offline mode works for every employee, also after a
+power cut. Up to 1000 cards.
+
+A payment taken offline goes into a **queue in flash**. When the server answers
+again the terminal **first sends the queue** (`POST /api/terminal/sync/`), then
+downloads a fresh card list. Each tap carries its own number, so sending it twice
+never charges twice. A trip started offline (`trip`, `route <n>`) is sent too and
+becomes the bus's running trip on the server, unless the crew started a newer one
+on the dashboard meanwhile. `status` shows how many payments are waiting; `sync`
+sends them at once.
+
+On the server an offline payment is dated when the card was tapped. The passenger
+has already ridden, so the terminal's decision stands: if the card was spent on
+another bus meanwhile, only what is left is taken (the amount is then less than the
+fare), and a card blocked **before** the tap is recorded as BLOCKED with no fare.
+
+Before the terminal has ever reached the server it uses the four demo cards; `reset`
+brings them back (refused while payments are waiting to be sent).
 
 ### Checks
 `check_esp32_parts` (every part, every 5 s) and `check_esp32_wifi` (joins the

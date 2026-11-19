@@ -7,8 +7,12 @@
 //   * Every 2 s it asks the server for messages:  POST /api/terminal/poll/
 //     (top-ups "MSG ...", fare changes "FARE 70", new trips "trip").
 //   * At start-up it asks  GET /api/status/  for the current route and fare.
-//   * No Wi-Fi, or no answer within 2 s: it decides by itself from the balances
-//     kept in its own flash memory (offline mode), exactly like the Uno.
+//   * Offline mode: no Wi-Fi, or no answer in time (2 s; 6 s for https), and it decides by itself
+//     from a copy of every card (GET /api/terminal/cards/: balance, blocked,
+//     company pays, already paid this trip), kept in flash. Payments it takes
+//     offline wait in a queue in flash (safe through power cuts) and are sent
+//     with POST /api/terminal/sync/ as soon as the server answers again, before
+//     anything else. Trips started offline ("trip", "route <n>") are sent too.
 //   * A '*' in the top right corner of the LCD means "connected to the server".
 //   * Wi-Fi, server address and token can be changed over the USB cable without
 //     uploading:  python3 tools/set_wifi.py "<network>" "<password>"
@@ -30,12 +34,15 @@
 //
 // Serial Monitor: 115200 baud, line ending "Newline". Type "help" for commands.
 // LED: GREEN = paid  RED = refused  YELLOW = already paid this trip  BLUE = asking the server
+// Sounds: each result has its own tune - edit them under "Sounds" below.
 
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <MFRC522.h>
 #include "secrets.h"
 
@@ -45,6 +52,56 @@ const int LCD_SDA = 21, LCD_SCL = 22;
 const int LED_R = 25, LED_G = 26, LED_B = 27;
 const int PIEZO = 13;
 const int PIEZO_CH = 0;  // ledc channel for the piezo
+
+// ---------- Sounds: EDIT HERE to customise the payment sounds ----------
+// Each sound is a list of {frequency in Hz, length in ms}. Frequency 0 = silence.
+// Piezos are loudest around 2000-4000 Hz, so keep tunes in octaves 6-7.
+// Try a sound without tapping a card: type "sound paid" (or "sound all") in
+// the Serial Monitor. Set SOUND_ON to false to silence the terminal.
+const bool SOUND_ON = true;
+const uint16_t NOTE_GAP_MS = 15;  // short silence after every note so repeats are heard apart
+
+const uint16_t REST = 0;
+// Note names start with N_ because A6, A7 etc. are already ESP32 pin names.
+const uint16_t N_C6 = 1047, N_D6 = 1175, N_E6 = 1319, N_F6 = 1397, N_G6 = 1568, N_A6 = 1760, N_B6 = 1976;
+const uint16_t N_C7 = 2093, N_D7 = 2349, N_E7 = 2637, N_F7 = 2794, N_G7 = 3136, N_A7 = 3520;
+const uint16_t N_C8 = 4186;
+
+struct Note {
+  uint16_t freq;
+  uint16_t ms;
+};
+
+// Payment went through: bright rising chime
+const Note SOUND_PAID[]    = {{N_C7, 80}, {N_E7, 80}, {N_G7, 160}};
+// Card already paid on this trip: two neutral beeps
+const Note SOUND_REPEAT[]  = {{N_A6, 90}, {REST, 60}, {N_A6, 90}};
+// Payment failed - not enough balance: falling "uh-oh" then a long low tone
+const Note SOUND_LOW[]     = {{N_E7, 120}, {N_C7, 120}, {REST, 60}, {N_G6, 400}};
+// Payment failed - card not registered / deactivated: harsh triple buzz
+const Note SOUND_UNKNOWN[] = {{N_D6, 100}, {REST, 50}, {N_D6, 100}, {REST, 50}, {N_D6, 300}};
+// Top-up arrived from the server
+const Note SOUND_TOPUP[]   = {{N_G6, 70}, {N_C7, 70}, {N_E7, 70}, {N_G7, 70}, {N_C8, 150}};
+// Terminal switched on and ready
+const Note SOUND_STARTUP[] = {{N_C7, 60}, {N_G7, 120}};
+
+struct Sound {
+  const char *name;  // used by the "sound <name>" command
+  const Note *notes;
+  uint8_t count;
+};
+#define SOUND(name, notes) {name, notes, sizeof(notes) / sizeof(notes[0])}
+const Sound SOUNDS[] = {
+  SOUND("paid", SOUND_PAID),
+  SOUND("repeat", SOUND_REPEAT),
+  SOUND("low", SOUND_LOW),
+  SOUND("unknown", SOUND_UNKNOWN),
+  SOUND("topup", SOUND_TOPUP),
+  SOUND("startup", SOUND_STARTUP),
+};
+enum SoundId { SND_PAID, SND_REPEAT, SND_LOW, SND_UNKNOWN, SND_TOPUP, SND_STARTUP };
+const uint8_t SOUND_COUNT = sizeof(SOUNDS) / sizeof(SOUNDS[0]);
+static_assert(SOUND_COUNT == SND_STARTUP + 1, "SOUNDS and SoundId must list the same sounds in the same order");
 
 // ---------- Routes (used offline; the server's fare wins when connected) ----------
 struct Route {
@@ -58,28 +115,61 @@ const Route ROUTES[] = {
 };
 const uint8_t ROUTE_COUNT = sizeof(ROUTES) / sizeof(ROUTES[0]);
 
-// ---------- Passengers (used offline; same list as the server's seed_demo) ----------
-struct Passenger {
+// ---------- Cards ----------
+// The real list comes from the server (GET /api/terminal/cards/) and is kept in
+// flash. These demo cards (same as the server's seed_demo) are only used until
+// the terminal has reached the server once, or after "reset".
+struct DemoCard {
   const char *uid;
-  const char *name;
-  uint16_t startBalance;
+  uint16_t balance;
+  uint8_t flags;
 };
-const Passenger PASSENGERS[] = {
-  {"A1B2C3D4", "Test: Kim",       200},
-  {"11223344", "Test: low funds",  30},
-  {"E5734107", "White card",      500},
-  {"008DEC53", "Blue fob",        500},
+const uint8_t F_PAID = 1, F_COMPANY = 2, F_OVER_LIMIT = 4, F_BLOCKED = 8;
+const DemoCard DEMO_CARDS[] = {
+  {"A1B2C3D4", 200, F_COMPANY},
+  {"11223344",  30, 0},
+  {"E5734107", 500, 0},
+  {"008DEC53", 500, 0},
 };
-const uint8_t PASSENGER_COUNT = sizeof(PASSENGERS) / sizeof(PASSENGERS[0]);
-static_assert(PASSENGER_COUNT <= 32, "trip-paid flags fit in 32 bits");
+const uint8_t DEMO_COUNT = sizeof(DEMO_CARDS) / sizeof(DEMO_CARDS[0]);
+
+const uint16_t MAX_CARDS = 1000;  // 24 bytes each in memory and in flash
+struct Card {
+  char uid[21];
+  uint16_t balance;
+  uint8_t flags;   // F_PAID (this trip), F_COMPANY (company pays), F_OVER_LIMIT, F_BLOCKED
+};
+
+// One payment taken offline, waiting to be sent to the server
+struct QueuedTap {
+  uint32_t ref;       // this terminal's own tap number, so a resend is never charged twice
+  char uid[21];
+  uint16_t fare;
+  uint32_t trip;      // the server trip the terminal knew
+  uint16_t offset;    // trips started offline since that one (0 = that trip)
+  uint32_t boot;      // which power-on; "at" is millis() of that power-on
+  uint32_t at;
+};
+const char *CARDS_FILE = "/cards.bin";
+const char *QUEUE_FILE = "/queue.bin";
+const uint8_t SYNC_BATCH = 50;    // taps per sync request (the server takes up to 100)
 
 // ---------- Settings ----------
 const uint16_t MAX_BALANCE = 50000;
 const unsigned long LED_MS = 1500;
-const unsigned long TAP_TIMEOUT_MS = 3000;     // server must answer a tap within this
+// A server on the internet (https://..., e.g. Railway) needs an encrypted handshake
+// on every request and is further away than a laptop on the same Wi-Fi: wait longer.
+// The server can be changed over the USB cable ("server <url>"), so this follows the
+// saved address (set in loadConfig() and by the server command), not secrets.h.
+bool SECURE_SERVER = false;
+#define TAP_TIMEOUT_MS    (SECURE_SERVER ? 6000UL : 3000UL)    // server must answer a tap within this
+#define POLL_TIMEOUT_MS   (SECURE_SERVER ? 5000UL : 1500UL)    // a poll while online
+#define PROBE_TIMEOUT_MS  (SECURE_SERVER ? 3000UL : 800UL)     // a poll while offline (blocks taps meanwhile)
+#define BULK_TIMEOUT_MS   (SECURE_SERVER ? 10000UL : 5000UL)   // card list and sync
 const unsigned long POLL_EVERY_MS = 2000;      // ask for messages this often when online
-const unsigned long RETRY_EVERY_MS = 5000;     // try to reach the server this often when offline
-const unsigned long ONLINE_TIMEOUT_MS = 8000;  // no good answer for this long = offline
+#define RETRY_EVERY_MS    (SECURE_SERVER ? 15000UL : 5000UL)   // try to reach the server this often when offline
+#define ONLINE_TIMEOUT_MS (SECURE_SERVER ? 20000UL : 8000UL)   // no good answer for this long = offline
+const unsigned long CARDS_EVERY_MS = 30000;    // refresh the card list this often when online
 const uint8_t LINE_LEN = 200;  // long enough for "wifi <name>|<password>"
 
 // ---------- State ----------
@@ -93,15 +183,19 @@ unsigned long lcdMessageAt = 0;
 
 bool serverOnline = false;
 unsigned long lastServerOkAt = 0, lastPollAt = 0;
-// The route and fare the server last told us. Kept (and saved in flash) when the
-// server goes away, so offline taps charge the running trip's fare, not a default.
-uint16_t serverFare = 0;          // 0 = never heard from a server: use the built-in route
-String serverRouteName;           // empty = use the built-in route's name
+uint16_t serverFare = 0;          // 0 = use the route's own fare (kept through offline spells)
+String serverRouteName;           // empty = use the route's own name
 bool wifiWasUp = false;
+unsigned long lastCardsAt = 0;
+bool cardsDue = true;             // refresh the card list at the next chance
 
-uint16_t balances[PASSENGER_COUNT];
+Card cards[MAX_CARDS];
+uint16_t cardCount = 0;
 uint8_t currentRoute = 0;
-uint32_t tripPaid = 0;            // bit i set = passenger i already paid this trip
+uint32_t serverTrip = 0;          // the server's trip this terminal is on (0 = never heard)
+uint16_t tripOffset = 0;          // trips started here since serverTrip, not yet told to the server
+char terminalId[9];               // random, made on first power-on; part of every offline tap's ref
+uint32_t nextRef = 1, bootNo = 0;
 
 char rxBuf[LINE_LEN];
 
@@ -206,58 +300,143 @@ void lcdMessage(const String &l1, const String &l2) {
 void setColor(bool r, bool g, bool b) {
   digitalWrite(LED_R, r); digitalWrite(LED_G, g); digitalWrite(LED_B, b);
 }
-void beep(int freq, int ms) { ledcWriteTone(PIEZO_CH, freq); delay(ms); ledcWriteTone(PIEZO_CH, 0); }
-void flash(bool r, bool g, bool b) {
-  // Same sounds as the Uno: 1 beep paid, 2 beeps already paid, 3 short + 1 long refused
+void playSound(SoundId id) {
+  if (!SOUND_ON) return;
+  const Sound &s = SOUNDS[id];
+  for (uint8_t i = 0; i < s.count; i++) {
+    ledcWriteTone(PIEZO_CH, s.notes[i].freq);
+    delay(s.notes[i].ms);
+    ledcWriteTone(PIEZO_CH, 0);
+    if (s.notes[i].freq) delay(NOTE_GAP_MS);
+  }
+}
+// LED colour + sound together, LED stays on for at least LED_MS
+void flash(bool r, bool g, bool b, SoundId sound) {
   setColor(r, g, b);
   unsigned long start = millis();
-  if (g && !r) {
-    beep(3000, 200);
-  } else if (r && g) {
-    beep(2700, 90); delay(70); beep(2700, 90);
-  } else if (r) {
-    for (int i = 0; i < 3; i++) { beep(2700, 80); delay(60); }
-    beep(2700, 400);
-  }
+  playSound(sound);
   unsigned long used = millis() - start;
   if (used < LED_MS) delay(LED_MS - used);
   setColor(false, false, false);
 }
 
 // ---------- Storage (flash memory: survives power cuts) ----------
-void saveBalances() { store.putBytes("bal", balances, sizeof(balances)); }
-void saveRoute() { store.putUChar("route", currentRoute); }
-void saveTripPaid() { store.putUInt("paid", tripPaid); }
+// Small values in Preferences; the card list and the offline queue in LittleFS files.
+void saveTripState() {
+  store.putUInt("strip", serverTrip);
+  store.putUShort("toff", tripOffset);
+  store.putUChar("route", currentRoute);
+  store.putUShort("sfare", serverFare);
+  store.putString("sroute", serverRouteName);
+}
 
-void resetBalances() {
-  for (uint8_t i = 0; i < PASSENGER_COUNT; i++) balances[i] = PASSENGERS[i].startBalance;
-  currentRoute = 0;
-  tripPaid = 0;
-  saveBalances(); saveRoute(); saveTripPaid();
-  store.putUChar("count", PASSENGER_COUNT);
+// cards.bin: card count (2 bytes), then MAX_CARDS fixed-size slots
+void saveCards() {
+  File f = LittleFS.open(CARDS_FILE, "w");
+  if (!f) { Serial.println("Flash: cannot save the card list"); return; }
+  f.write((uint8_t *)&cardCount, sizeof(cardCount));
+  f.write((uint8_t *)cards, sizeof(Card) * cardCount);
+  f.close();
+}
+// Rewrite just one card (a tap changes one balance; no need to rewrite them all)
+void saveCard(uint16_t i) {
+  File f = LittleFS.open(CARDS_FILE, "r+");
+  if (!f) { saveCards(); return; }
+  f.seek(sizeof(cardCount) + sizeof(Card) * i);
+  f.write((uint8_t *)&cards[i], sizeof(Card));
+  f.close();
+}
+bool loadCards() {
+  File f = LittleFS.open(CARDS_FILE, "r");
+  if (!f) return false;
+  uint16_t n = 0;
+  bool ok = f.read((uint8_t *)&n, sizeof(n)) == sizeof(n) && n <= MAX_CARDS &&
+            f.read((uint8_t *)cards, sizeof(Card) * n) == sizeof(Card) * n;
+  f.close();
+  cardCount = ok ? n : 0;
+  return ok;
+}
+void loadDemoCards() {
+  cardCount = DEMO_COUNT;
+  for (uint8_t i = 0; i < DEMO_COUNT; i++) {
+    strncpy(cards[i].uid, DEMO_CARDS[i].uid, sizeof(cards[i].uid));
+    cards[i].balance = DEMO_CARDS[i].balance;
+    cards[i].flags = DEMO_CARDS[i].flags;
+  }
+  saveCards();
+}
+
+uint16_t queuedCount() {
+  File f = LittleFS.open(QUEUE_FILE, "r");
+  if (!f) return 0;
+  uint16_t n = f.size() / sizeof(QueuedTap);
+  f.close();
+  return n;
+}
+bool enqueue(const char *uid, uint16_t fare) {
+  QueuedTap q = {};
+  q.ref = nextRef++;
+  store.putUInt("ref", nextRef);
+  strncpy(q.uid, uid, sizeof(q.uid) - 1);
+  q.fare = fare;
+  q.trip = serverTrip;
+  q.offset = tripOffset;
+  q.boot = bootNo;
+  q.at = millis();
+  File f = LittleFS.open(QUEUE_FILE, "a");
+  if (!f) return false;
+  bool ok = f.write((uint8_t *)&q, sizeof(q)) == sizeof(q);
+  f.close();
+  return ok;
+}
+// Drop the first n taps of the queue (they reached the server)
+void dequeue(uint16_t n) {
+  File in = LittleFS.open(QUEUE_FILE, "r");
+  if (!in) return;
+  in.seek(sizeof(QueuedTap) * n);
+  File out = LittleFS.open("/queue.tmp", "w");
+  QueuedTap q;
+  while (in.read((uint8_t *)&q, sizeof(q)) == sizeof(q)) out.write((uint8_t *)&q, sizeof(q));
+  in.close();
+  out.close();
+  LittleFS.remove(QUEUE_FILE);
+  LittleFS.rename("/queue.tmp", QUEUE_FILE);
 }
 
 void loadState() {
-  if (store.getUChar("count", 0) != PASSENGER_COUNT ||
-      store.getBytes("bal", balances, sizeof(balances)) != sizeof(balances)) {
-    Serial.println("First run (or passenger list changed): loading start balances.");
-    resetBalances();
-    return;
+  if (!LittleFS.begin(true)) Serial.println("Flash: LittleFS failed; offline cards will not survive a restart");
+  // A random ID per terminal, so its tap numbers never clash with another terminal's
+  // (or with its own after the flash is wiped)
+  String id = store.getString("tid", "");
+  if (id.length() != 8) {
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%08X", (unsigned)esp_random());
+    id = buf;
+    store.putString("tid", id);
   }
+  id.toCharArray(terminalId, sizeof(terminalId));
+  nextRef = store.getUInt("ref", 1);
+  bootNo = store.getUInt("boot", 0) + 1;
+  store.putUInt("boot", bootNo);
+  serverTrip = store.getUInt("strip", 0);
+  tripOffset = store.getUShort("toff", 0);
   currentRoute = store.getUChar("route", 0);
-  tripPaid = store.getUInt("paid", 0);
   if (currentRoute >= ROUTE_COUNT) currentRoute = 0;
+  serverFare = store.getUShort("sfare", 0);
+  serverRouteName = store.getString("sroute", "");
+  if (!loadCards()) {
+    Serial.println("No card list yet: using the demo cards until the server is reached.");
+    loadDemoCards();
+  }
 }
 
 // ---------- Helpers ----------
-bool hasPaid(uint8_t i) { return tripPaid & (1UL << i); }
-void markPaid(uint8_t i) { tripPaid |= (1UL << i); saveTripPaid(); }
-
-int findPassenger(const char *uid) {
-  for (uint8_t i = 0; i < PASSENGER_COUNT; i++)
-    if (strcmp(uid, PASSENGERS[i].uid) == 0) return i;
+int findCard(const char *uid) {
+  for (uint16_t i = 0; i < cardCount; i++)
+    if (strcmp(uid, cards[i].uid) == 0) return i;
   return -1;
 }
+bool hasPaid(uint16_t i) { return cards[i].flags & F_PAID; }
 
 void normalizeUid(const char *in, char *out, size_t outSize) {
   size_t n = 0;
@@ -279,11 +458,32 @@ void lcdIdle() {
   lcdShowingMessage = false;
 }
 
+void clearPaid() {
+  for (uint16_t i = 0; i < cardCount; i++) cards[i].flags &= ~F_PAID;
+  saveCards();
+}
+
+bool syncQueue();   // below
+bool fetchCards();
+
+// A trip started here ("trip" or "route <n>" typed on the terminal). The server
+// hears about it at the next sync.
 void newTrip() {
-  tripPaid = 0;
-  saveTripPaid();
+  clearPaid();
+  tripOffset++;
+  saveTripState();
   Serial.println("New trip started: every card can pay once.");
   lcdMessage("New trip", routeName());
+  if (serverOnline && syncQueue()) fetchCards();
+}
+// The server started a new trip (the crew did it on the dashboard)
+void newTripFromServer() {
+  clearPaid();
+  tripOffset = 0;
+  saveTripState();
+  Serial.println("New trip started by the server: every card can pay once.");
+  lcdMessage("New trip", routeName());
+  cardsDue = true;   // learn the new trip's number
 }
 
 // ---------- Tiny JSON readers (enough for the server's flat answers) ----------
@@ -305,19 +505,31 @@ long jsonNumber(const String &json, const char *key, long fallback) {
 }
 
 // ---------- Talking to the server ----------
+// One connection to the server, kept open and reused by every tap and poll. Over
+// https a new connection costs an encrypted handshake (seconds from Kenya to the
+// cloud); reusing it brings a tap down to one round trip.
+WiFiClient plainClient;
+WiFiClientSecure tlsClient;   // encrypted; the server's certificate is not checked (setInsecure)
+HTTPClient api;
+
 // Returns the HTTP status (or a negative error); the answer body goes in `body`.
 int serverRequest(const char *method, const char *path, const String &payload, String &body,
                   unsigned long timeoutMs) {
   if (WiFi.status() != WL_CONNECTED) return -100;
-  HTTPClient http;
-  http.setConnectTimeout(timeoutMs);
-  http.setTimeout(timeoutMs);
-  if (!http.begin(cfgUrl + path)) return -101;
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Terminal ") + cfgToken);  // identifies this vehicle
-  int code = strcmp(method, "GET") == 0 ? http.GET() : http.POST(payload);
-  body = code > 0 ? http.getString() : "";
-  http.end();
+  api.setReuse(true);
+  api.setConnectTimeout(timeoutMs);
+  api.setTimeout(timeoutMs);
+  String url = cfgUrl + path;
+  if (!(SECURE_SERVER ? api.begin(tlsClient, url) : api.begin(plainClient, url))) return -101;
+  api.addHeader("Content-Type", "application/json");
+  api.addHeader("Authorization", String("Terminal ") + cfgToken);  // identifies this vehicle
+  int code = strcmp(method, "GET") == 0 ? api.GET() : api.POST(payload);
+  body = code > 0 ? api.getString() : "";
+  api.end();   // keeps the connection open for the next request
+  if (code < 0) {   // broken connection: start a fresh one next time
+    tlsClient.stop();
+    plainClient.stop();
+  }
   if (code == 401 || code == 403) Serial.println("Server refused the terminal token: set it with:  token <token>");
   return code;
 }
@@ -337,27 +549,138 @@ void markServer(bool ok) {
   }
 }
 
-void saveServerTrip() {
-  store.putUShort("sfare", serverFare);
-  store.putString("sroute", serverRouteName);
-}
-
 void fetchStatus() {
   String body;
-  int code = serverRequest("GET", "/api/status/", "", body, 3000);
-  if (code != 200) {
-    Serial.printf("Server status: failed (%d)\n", code);
-    return;
-  }
-  {
+  int code = serverRequest("GET", "/api/status/", "", body, POLL_TIMEOUT_MS);
+  if (code == 200) {
     long fare = jsonNumber(body, "fare", 0);
     if (fare > 0 && fare <= MAX_BALANCE) serverFare = fare;
     String name = jsonString(body, "route_name");
     if (name.length()) serverRouteName = name;
-    saveServerTrip();
+    saveTripState();
     Serial.printf("Server status: %s, KSh %u\n", routeName().c_str(), currentFare());
     if (!lcdShowingMessage) lcdIdle();
   }
+}
+
+// Send the payments taken offline (and trips started offline). True when nothing
+// is left to send. Safe to repeat: the server skips taps it already has.
+bool syncQueue() {
+  uint16_t total = queuedCount();
+  if (total == 0 && tripOffset == 0) return true;
+  Serial.printf("Sync: sending %u offline payment(s), %u trip(s) started offline\n", total, tripOffset);
+  bool first = true;
+  while (first || queuedCount() > 0) {
+    first = false;
+    File f = LittleFS.open(QUEUE_FILE, "r");
+    String json;
+    json.reserve(140 * SYNC_BATCH + 120);
+    json = String("{\"terminal\": \"") + terminalId + "\", \"trip\": " + serverTrip +
+           ", \"trips_started\": " + tripOffset + ", \"taps\": [";
+    uint16_t n = 0;
+    QueuedTap q;
+    while (f && n < SYNC_BATCH && f.read((uint8_t *)&q, sizeof(q)) == sizeof(q)) {
+      if (n) json += ", ";
+      json += String("{\"ref\": ") + q.ref + ", \"card_uid\": \"" + q.uid + "\", \"fare\": " + q.fare +
+              ", \"trip\": " + q.trip + ", \"offset\": " + q.offset + ", \"seconds_ago\": ";
+      json += q.boot == bootNo ? String((millis() - q.at) / 1000) : String("null");  // unknown after a restart
+      json += "}";
+      n++;
+    }
+    if (f) f.close();
+    json += "]}";
+    String body;
+    int code = serverRequest("POST", "/api/terminal/sync/", json, body, BULK_TIMEOUT_MS);
+    if (code != 200) {
+      Serial.printf("Sync: failed (%d), kept for later. %s\n", code, body.substring(0, 120).c_str());
+      return false;
+    }
+    dequeue(n);
+    long trip = jsonNumber(body, "trip", 0);
+    if (queuedCount() == 0 && trip > 0) {
+      serverTrip = trip;   // the server now knows about every trip started here
+      tripOffset = 0;
+      saveTripState();
+    }
+    Serial.printf("Sync: %u sent, %u left\n", n, queuedCount());
+  }
+  cardsDue = true;
+  return true;
+}
+
+// Download every card (balance, blocked, company pays, paid this trip):
+//   TRIP 12 FARE 50 Campus shuttle
+//   E5734107 450 P
+// Only when nothing is waiting to be sent: otherwise the server's balances would
+// not yet include the offline payments.
+bool fetchCards() {
+  if (WiFi.status() != WL_CONNECTED || queuedCount() > 0 || tripOffset > 0) return false;
+  HTTPClient http;
+  http.setConnectTimeout(BULK_TIMEOUT_MS);
+  http.setTimeout(BULK_TIMEOUT_MS);
+  http.setReuse(false);   // one request, then the connection closes
+  if (!http.begin(cfgUrl + "/api/terminal/cards/")) return false;
+  http.addHeader("Authorization", String("Terminal ") + cfgToken);
+  int code = http.GET();
+  int size = http.getSize();   // bytes in the answer (-1 = not given)
+  if (code != 200) {
+    http.end();
+    return false;
+  }
+  WiFiClient *stream = http.getStreamPtr();
+  String header = stream->readStringUntil('\n');
+  long got = header.length() + 1;
+  unsigned trip = 0, fare = 0;
+  int nameAt = 0;
+  if (sscanf(header.c_str(), "TRIP %u FARE %u %n", &trip, &fare, &nameAt) < 2 || trip == 0) {
+    http.end();
+    Serial.println("Cards: unexpected answer from the server");
+    return false;
+  }
+  uint16_t n = 0;
+  bool complete = false;
+  unsigned long start = millis();
+  while (millis() - start < 10000) {
+    if (size >= 0 && got >= size) { complete = true; break; }
+    String line = stream->readStringUntil('\n');
+    got += line.length() + 1;
+    if (line.length() == 0) {
+      if (size < 0 && !stream->connected() && !stream->available()) { complete = true; break; }
+      continue;
+    }
+    char uid[21] = "", flags[8] = "";
+    unsigned bal = 0;
+    if (sscanf(line.c_str(), "%20s %u %7s", uid, &bal, flags) != 3) continue;
+    if (n >= MAX_CARDS) {
+      Serial.printf("Cards: more than %u cards; the rest are not kept for offline mode\n", MAX_CARDS);
+      complete = true;
+      break;
+    }
+    strncpy(cards[n].uid, uid, sizeof(cards[n].uid));
+    cards[n].balance = bal > MAX_BALANCE ? MAX_BALANCE : bal;
+    cards[n].flags = (strchr(flags, 'P') ? F_PAID : 0) | (strchr(flags, 'C') ? F_COMPANY : 0) |
+                     (strchr(flags, 'X') ? F_OVER_LIMIT : 0) | (strchr(flags, 'B') ? F_BLOCKED : 0);
+    n++;
+  }
+  http.end();
+  if (!complete) {
+    Serial.println("Cards: download cut off; keeping the old list");
+    loadCards();
+    return false;
+  }
+  cardCount = n;
+  saveCards();
+  serverTrip = trip;
+  tripOffset = 0;
+  if (fare > 0 && fare <= MAX_BALANCE) serverFare = fare;
+  serverRouteName = header.substring(nameAt);
+  serverRouteName.trim();
+  saveTripState();
+  lastCardsAt = millis();
+  cardsDue = false;
+  Serial.printf("Cards: %u cards for offline mode, trip %u, %s KSh %u\n", n, trip, routeName().c_str(), currentFare());
+  if (!lcdShowingMessage) lcdIdle();
+  return true;
 }
 
 void handleLine(char *line, bool fromServer = false);  // below
@@ -365,14 +688,17 @@ void handleLine(char *line, bool fromServer = false);  // below
 // Ask the server for waiting messages: {"lines": ["MSG Top-up +100|Bal: KSh 600", "FARE 70"]}
 void pollServer() {
   String body;
-  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, 2500);
+  int code = serverRequest("POST", "/api/terminal/poll/", "{}", body, serverOnline ? POLL_TIMEOUT_MS : PROBE_TIMEOUT_MS);
   bool wasOnline = serverOnline;
   markServer(code == 200);
   if (code != 200) {
     if (wasOnline && !serverOnline && code != -100) Serial.printf("Server: no answer (%d)\n", code);
     return;
   }
-  if (!wasOnline) fetchStatus();
+  if (!wasOnline) {
+    // Back online: first send what was taken offline, then refresh the card list
+    if (!(syncQueue() && fetchCards())) fetchStatus();
+  }
   int pos = body.indexOf('[');
   while (pos >= 0) {
     int q1 = body.indexOf('"', pos + 1);
@@ -383,7 +709,8 @@ void pollServer() {
     char buf[LINE_LEN];
     one.toCharArray(buf, sizeof(buf));
     Serial.printf("Server says: %s\n", buf);
-    handleLine(buf, true);  // server lines may never change the Wi-Fi settings
+    if (strcmp(buf, "trip") == 0) newTripFromServer();   // the crew started a trip on the dashboard
+    else handleLine(buf, true);                           // server lines may never change the Wi-Fi settings
     pos = q2;
   }
 }
@@ -391,26 +718,45 @@ void pollServer() {
 // Show what the server decided, and copy it into our own memory so that offline
 // mode carries on from the same balances if the server goes away.
 void showServerResult(const char *uid, const String &result, long fare, long balance) {
-  int p = findPassenger(uid);
-  if (p >= 0 && balance >= 0 && balance <= MAX_BALANCE && result != "UNKNOWN") {
-    balances[p] = balance;
-    saveBalances();
+  int p = findCard(uid);
+  if (result == "UNKNOWN" || result == "BLOCKED") {
+    // No real balance comes with these (0). Make offline mode refuse the card too.
+    if (p >= 0) {
+      if (result == "BLOCKED") cards[p].flags |= F_BLOCKED;
+      else cards[p] = cards[--cardCount];   // deactivated: forget the card
+      if (result == "BLOCKED") saveCard(p); else saveCards();
+    }
+  } else if (balance >= 0 && balance <= MAX_BALANCE) {
+    if (p < 0 && cardCount < MAX_CARDS) {   // a card registered since the last card list
+      p = cardCount++;
+      strncpy(cards[p].uid, uid, sizeof(cards[p].uid));
+      cards[p].flags = 0;
+      cardsDue = true;   // learn whether its company pays
+    }
+    if (p >= 0) {
+      cards[p].balance = balance;
+      cards[p].flags &= ~F_BLOCKED;
+      if (result == "PAID" || result == "REPEAT") cards[p].flags |= F_PAID;
+      saveCards();
+    }
   }
   Serial.printf("Server: %s  fare %ld  balance %ld\n", result.c_str(), fare, balance);
   if (result == "PAID") {
-    if (p >= 0) markPaid(p);
     lcdMessage(String("PAID KSh ") + fare, String("Bal: KSh ") + balance);
-    flash(false, true, false);
+    flash(false, true, false, SND_PAID);
   } else if (result == "REPEAT") {
-    if (p >= 0) markPaid(p);
     lcdMessage("Already paid", String("Bal: KSh ") + balance);
-    flash(true, true, false);
+    flash(true, true, false, SND_REPEAT);
   } else if (result == "LOW") {
     lcdMessage("Low balance", String("Has ") + balance + " need " + fare);
-    flash(true, false, false);
+    flash(true, false, false, SND_LOW);
+  } else if (result == "BLOCKED") {
+    // The owner reported this card lost or stolen
+    lcdMessage("Card blocked", "Reported lost");
+    flash(true, false, false, SND_UNKNOWN);
   } else {
     lcdMessage("Unknown card", "See conductor");
-    flash(true, false, false);
+    flash(true, false, false, SND_UNKNOWN);
   }
 }
 
@@ -436,32 +782,52 @@ bool serverTap(const char *uid) {
 // ---------- Offline decision (same rules as the server) ----------
 void offlineTap(const char *uid) {
   uint16_t fare = currentFare();
-  int p = findPassenger(uid);
+  int p = findCard(uid);
   if (p < 0) {
     Serial.println("OFFLINE: unknown card");
     lcdMessage("Unknown card", "See conductor");
-    flash(true, false, false);
+    flash(true, false, false, SND_UNKNOWN);
     return;
   }
-  Serial.printf("OFFLINE: %s\n", PASSENGERS[p].name);
+  Card &c = cards[p];
+  if (c.flags & F_BLOCKED) {
+    Serial.println("OFFLINE: card blocked (reported lost)");
+    lcdMessage("Card blocked", "Reported lost");
+    flash(true, false, false, SND_UNKNOWN);
+    return;
+  }
   if (hasPaid(p)) {
-    Serial.println("  already paid this trip");
-    lcdMessage("Already paid", String("Bal: KSh ") + balances[p]);
-    flash(true, true, false);
+    Serial.println("OFFLINE: already paid this trip");
+    lcdMessage("Already paid", String("Bal: KSh ") + c.balance);
+    flash(true, true, false, SND_REPEAT);
     return;
   }
-  if (balances[p] < fare) {
-    Serial.printf("  low balance: has %u, needs %u\n", balances[p], fare);
-    lcdMessage("Low balance", String("Has ") + balances[p] + " need " + fare);
-    flash(true, false, false);
+  bool company = c.flags & F_COMPANY;
+  if (company && (c.flags & F_OVER_LIMIT)) {
+    Serial.println("OFFLINE: company over its credit limit");
+    lcdMessage("Declined", "Company limit");
+    flash(true, false, false, SND_LOW);
     return;
   }
-  balances[p] -= fare;
-  saveBalances();
-  markPaid(p);
-  Serial.printf("  PAID KSh %u, balance KSh %u\n", fare, balances[p]);
-  lcdMessage(String("PAID KSh ") + fare, String("Bal: KSh ") + balances[p]);
-  flash(false, true, false);
+  if (!company && c.balance < fare) {
+    Serial.printf("OFFLINE: low balance: has %u, needs %u\n", c.balance, fare);
+    lcdMessage("Low balance", String("Has ") + c.balance + " need " + fare);
+    flash(true, false, false, SND_LOW);
+    return;
+  }
+  if (!enqueue(uid, fare)) {   // never let anyone ride on a payment we cannot keep
+    Serial.println("OFFLINE: cannot save the payment to flash; refused");
+    lcdMessage("Terminal error", "Pay the crew");
+    flash(true, false, false, SND_UNKNOWN);
+    return;
+  }
+  if (!company) c.balance -= fare;
+  c.flags |= F_PAID;
+  saveCard(p);
+  Serial.printf("OFFLINE: PAID KSh %u%s, balance KSh %u (%u waiting to send)\n", fare,
+                company ? " by the company" : "", c.balance, queuedCount());
+  lcdMessage(String("PAID KSh ") + fare, company ? String("Company account") : String("Bal: KSh ") + c.balance);
+  flash(false, true, false, SND_PAID);
 }
 
 void handleTap(const char *uid) {
@@ -472,10 +838,16 @@ void handleTap(const char *uid) {
 }
 
 // ---------- Commands (Serial Monitor) and server lines ----------
-void listPassengers() {
-  for (uint8_t i = 0; i < PASSENGER_COUNT; i++)
-    Serial.printf("%s  %-16s KSh %u%s\n", PASSENGERS[i].uid, PASSENGERS[i].name, balances[i],
-                  hasPaid(i) ? "  (paid this trip)" : "");
+void listCards() {
+  const uint16_t SHOWN = 40;
+  for (uint16_t i = 0; i < cardCount && i < SHOWN; i++) {
+    const Card &c = cards[i];
+    Serial.printf("%-20s KSh %5u%s%s%s%s\n", c.uid, c.balance, (c.flags & F_PAID) ? "  paid this trip" : "",
+                  (c.flags & F_COMPANY) ? "  company pays" : "", (c.flags & F_OVER_LIMIT) ? " (over limit)" : "",
+                  (c.flags & F_BLOCKED) ? "  BLOCKED" : "");
+  }
+  if (cardCount > SHOWN) Serial.printf("... and %u more\n", cardCount - SHOWN);
+  Serial.printf("%u cards, %u offline payment(s) waiting to be sent\n", cardCount, queuedCount());
 }
 
 void printStatus() {
@@ -483,6 +855,26 @@ void printStatus() {
   if (WiFi.status() == WL_CONNECTED) Serial.printf(" (%s, IP %s, %d dBm)", cfgSsid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
   Serial.printf("\nServer: %s  %s\n", cfgUrl.c_str(), serverOnline ? "ONLINE" : "offline");
   Serial.printf("Route: %s  |  Fare: KSh %u\n", routeName().c_str(), currentFare());
+  Serial.printf("Trip: server %u + %u started here  |  Cards: %u  |  Waiting to send: %u  |  Terminal %s\n",
+                serverTrip, tripOffset, cardCount, queuedCount(), terminalId);
+}
+
+// "sound paid" plays one sound, "sound all" plays every sound, "sound" lists them
+void testSound(const char *arg) {
+  while (*arg == ' ') arg++;
+  for (uint8_t i = 0; i < SOUND_COUNT; i++) {
+    if (*arg == '\0') { Serial.printf("  sound %s\n", SOUNDS[i].name); continue; }
+    bool all = strcasecmp(arg, "all") == 0;
+    if (all || strcasecmp(arg, SOUNDS[i].name) == 0) {
+      Serial.printf("Playing: %s\n", SOUNDS[i].name);
+      playSound((SoundId)i);
+      if (!all) return;
+      delay(600);
+    }
+  }
+  if (*arg == '\0') Serial.println("  sound all");
+  else if (strcasecmp(arg, "all") != 0) Serial.println("No such sound. Type: sound");
+  if (!SOUND_ON) Serial.println("(SOUND_ON is false: the terminal is muted)");
 }
 
 // ---------- Settings over the USB cable ----------
@@ -491,6 +883,7 @@ void loadConfig() {
   cfgPass = store.getString("pass", WIFI_PASS);
   cfgUrl = store.getString("url", SERVER_URL);
   cfgToken = store.getString("token", TERMINAL_TOKEN);
+  SECURE_SERVER = cfgUrl.startsWith("https");
 }
 
 void printConfig() {
@@ -553,6 +946,9 @@ bool handleConfigCommand(char *line) {
     }
     cfgUrl = url;
     store.putString("url", cfgUrl);
+    SECURE_SERVER = cfgUrl.startsWith("https");
+    tlsClient.stop();     // drop the open connection to the old server
+    plainClient.stop();
     Serial.printf("SAVED server %s\n", cfgUrl.c_str());
     serverOnline = false;
     lastServerOkAt = 0;
@@ -586,40 +982,50 @@ void handleLine(char *line, bool fromServer) {
     char *second = strchr(line + 4, '|');
     if (second) *second++ = '\0';
     lcdMessage(line + 4, second ? second : "");
+    if (strncasecmp(line + 4, "Top-up", 6) == 0) {
+      playSound(SND_TOPUP);
+      cardsDue = true;   // pick up the new balance for offline mode
+    }
   } else if (strncasecmp(line, "fare ", 5) == 0) {
     long f = atol(line + 5);
     if (f > 0 && f <= MAX_BALANCE) {
       serverFare = f;
-      saveServerTrip();
+      saveTripState();
       Serial.printf("Fare is now KSh %ld\n", f);
       if (!lcdShowingMessage) lcdIdle();
     }
   } else if (strcasecmp(line, "trip") == 0) {
     newTrip();
-    if (fromServer) fetchStatus();  // the new trip may be on another route: get its name and fare
+  } else if (strcasecmp(line, "sync") == 0) {
+    if (syncQueue()) fetchCards();
+    listCards();
   } else if (strcasecmp(line, "help") == 0) {
-    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          passengers and offline balances\n  status        Wi-Fi and server\n  route <n>     switch route offline (starts a new trip)\n  trip          new trip\n  reset         restore start balances (offline copy)\n  config        show Wi-Fi / server / token settings\n  wifi <name>|<password>   change Wi-Fi (saved, no upload needed)\n  server <url>  change the server, e.g. server http://192.168.100.33:8000\n  token <token> change the vehicle token\n  config reset  back to the secrets.h defaults");
+    Serial.println("Commands:\n  <card id>     simulate a tap, e.g. E5734107\n  list          cards kept for offline mode\n  status        Wi-Fi, server, trip, payments waiting to be sent\n  route <n>     switch route (starts a new trip)\n  trip          new trip\n  sync          send offline payments now and refresh the cards\n  sound [name]  play a payment sound (sound all = every one)\n  reset         back to the demo cards (only when nothing is waiting to be sent)\n  config        show Wi-Fi / server / token settings\n  wifi <name>|<password>   change Wi-Fi (saved, no upload needed)\n  server <url>  change the server, e.g. server https://<app>.up.railway.app\n  token <token> change the vehicle token\n  config reset  back to the secrets.h defaults");
+  } else if (strncasecmp(line, "sound", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+    testSound(line + 5);
   } else if (strcasecmp(line, "list") == 0) {
-    listPassengers();
+    listCards();
   } else if (strcasecmp(line, "status") == 0) {
     printStatus();
   } else if (strncasecmp(line, "route ", 6) == 0) {
     int n = atoi(line + 6);
     if (n >= 1 && n <= ROUTE_COUNT) {
       currentRoute = n - 1;
-      saveRoute();
-      serverFare = 0;            // a route chosen by hand on the terminal wins
+      serverFare = 0;            // the crew chose a route here: use its fare
       serverRouteName = "";
-      saveServerTrip();
       newTrip();
     } else {
       Serial.println("No such route.");
     }
   } else if (strcasecmp(line, "reset") == 0) {
-    resetBalances();
-    Serial.println("Balances reset.");
-    lcdMessage("Balances reset", "New trip");
-    listPassengers();
+    if (queuedCount() > 0 || tripOffset > 0) {
+      Serial.println("Not reset: offline payments are waiting to be sent. Type: sync");
+    } else {
+      loadDemoCards();
+      Serial.println("Back to the demo cards (the server's list returns when it is reached).");
+      lcdMessage("Demo cards", "loaded");
+      listCards();
+    }
   } else {
     char uid[21];
     normalizeUid(line, uid, sizeof(uid));
@@ -688,10 +1094,9 @@ void setup() {
   uint8_t v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   readerOk = !(v == 0x00 || v == 0xFF);
 
+  tlsClient.setInsecure();
   store.begin("fare", false);
   loadConfig();
-  serverFare = store.getUShort("sfare", 0);
-  serverRouteName = store.getString("sroute", "");
   loadState();
 
   WiFi.mode(WIFI_STA);
@@ -717,6 +1122,7 @@ void setup() {
   pollServer();
   printStatus();
   lcdIdle();
+  playSound(SND_STARTUP);
   Serial.println("READY. Type 'help' for commands.");
 }
 
@@ -727,6 +1133,10 @@ void loop() {
   if (millis() - lastPollAt >= every) {
     lastPollAt = millis();
     pollServer();
+    if (serverOnline && (cardsDue || millis() - lastCardsAt >= CARDS_EVERY_MS)) {
+      lastCardsAt = millis();   // also spaces out retries when a sync keeps failing
+      if (syncQueue()) fetchCards();
+    }
   }
 
   if (lcdShowingMessage && millis() - lcdMessageAt > lcdMessageMs) lcdIdle();
