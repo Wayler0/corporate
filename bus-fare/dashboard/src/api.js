@@ -77,6 +77,7 @@ export const api = {
   trips: () => get('/operator/trips/'),
   routes: () => get('/routes/'),
   newTrip: (routeId) => post('/operator/trip/', routeId ? { route: routeId } : {}),
+  setReserved: (seats) => post('/operator/reserved/', { seats }),
 
   // company admin
   company: () => get('/company/'),

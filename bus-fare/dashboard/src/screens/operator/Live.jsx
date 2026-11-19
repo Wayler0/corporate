@@ -15,7 +15,14 @@ export default function Live() {
   const { user } = useAuth()
   const poll = usePoll(api.live, 2000)
   const [filter, setFilter] = useState('all')
+  const [seatBusy, setSeatBusy] = useState(false)
   const highlight = useRef({ data: null, ids: null, fresh: new Set() })   // to highlight new taps
+
+  async function setReserved(n) {
+    if (seatBusy) return
+    setSeatBusy(true)
+    try { await api.setReserved(n); poll.refresh() } catch { /* shown by the poll */ } finally { setSeatBusy(false) }
+  }
 
   const live = poll.data
   if (!live) {
@@ -27,7 +34,7 @@ export default function Live() {
     )
   }
 
-  const { trip, stats, terminal, taps } = live
+  const { trip, stats, terminal, taps, seats } = live
   // Work out once per answer from the server (React may render twice)
   if (highlight.current.data !== live) {
     const before = highlight.current.ids
@@ -70,6 +77,27 @@ export default function Live() {
           <div><span className="label">Paid</span><strong className="fg-paid">{stats.paid}</strong></div>
           <div><span className="label">Declined</span><strong className="fg-refused">{stats.refused}</strong></div>
         </section>
+
+        {seats && (
+          <section className="card pad stack" aria-label="Reserved seats">
+            <div className="row-between">
+              <h2>Reserved seats</h2>
+              <span className="muted small">For corporate cards</span>
+            </div>
+            <div className="stats">
+              <div><span className="label">Reserved</span><strong>{seats.reserved}</strong></div>
+              <div><span className="label">Boarded</span><strong className="fg-paid">{seats.boarded}</strong></div>
+              <div><span className="label">Left</span><strong>{seats.left}</strong></div>
+            </div>
+            <div className="chips" role="group" aria-label="Set reserved seats for this trip">
+              {[0, 5, 10, 15, 20, 25].map((n) => (
+                <button key={n} type="button" className="chip" aria-pressed={seats.reserved === n} disabled={seatBusy} onClick={() => setReserved(n)}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="stack">
           <div className="row-between">

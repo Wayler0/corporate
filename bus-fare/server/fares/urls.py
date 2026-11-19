@@ -22,6 +22,7 @@ urlpatterns = [
     path('operator/live/', views.OperatorLiveView.as_view(), name='operator-live'),
     path('operator/trips/', views.OperatorTripsView.as_view(), name='operator-trips'),
     path('operator/trip/', views.OperatorNewTripView.as_view(), name='operator-new-trip'),
+    path('operator/reserved/', views.OperatorReservedView.as_view(), name='operator-reserved'),
     path('routes/', views.RouteListView.as_view(), name='routes'),
 
     # Company admin: their own company
