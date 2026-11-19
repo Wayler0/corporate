@@ -25,13 +25,14 @@ from .permissions import IsCompanyAdmin, IsEmployee, IsOperator, IsTerminal, Ter
 from .serializers import (
     AccountTransactionSerializer, EmployeeSerializer, LoginSerializer, NewTripRequestSerializer,
     OfflineSyncSerializer,
-    OperatorTapSerializer, PasswordChangeSerializer, PaymentMethodSerializer, RouteSerializer,
-    TapRequestSerializer, TapResponseSerializer, TopUpSerializer,
+    OperatorTapSerializer, PasswordChangeSerializer, PaymentMethodSerializer, ReservedSeatsSerializer,
+    RouteSerializer, TapRequestSerializer, TapResponseSerializer, TopUpSerializer,
 )
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
-    block_card, create_employee, get_current_trip, process_tap, reset_password, settlements_total,
-    start_new_trip, sync_offline, tap_totals, terminal_cards, terminal_status, top_up, trip_stats,
+    block_card, create_employee, get_current_trip, process_tap, reserved_summary, reset_password,
+    set_reserved_seats, settlements_total, start_new_trip, sync_offline, tap_totals, terminal_cards,
+    terminal_status, top_up, trip_stats,
 )
 
 LIVE_TAPS = 30       # taps on the operator's live screen
@@ -238,6 +239,7 @@ class OperatorLiveView(OperatorView):
         return Response({
             'trip': {**trip_summary(trip), 'started_at': trip.started_at},
             'stats': trip_stats(trip),
+            'seats': reserved_summary(trip),
             'terminal': terminal_status(self.vehicle),
             'taps': OperatorTapSerializer(taps, many=True).data,
         })
@@ -271,6 +273,23 @@ class OperatorNewTripView(OperatorView):
         except NoRouteError as error:
             return no_route(error)
         return Response(trip_summary(trip), status=status.HTTP_201_CREATED)
+
+
+class OperatorReservedView(OperatorView):
+    """POST /api/operator/reserved/ {"seats": 15} -> {"reserved", "boarded", "left"}.
+    Sets how many seats this trip holds for corporate card holders. The crew live
+    screen counts corporate taps against it (bus-fare/BOARDING_DESIGN.md)."""
+
+    def post(self, request):
+        serializer = ReservedSeatsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            trip = set_reserved_seats(self.vehicle, serializer.validated_data['seats'])
+        except NoRouteError as error:
+            return no_route(error)
+        except AmountError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(reserved_summary(trip))
 
 
 class RouteListView(APIView):

@@ -143,6 +143,9 @@ class Trip(models.Model):
     ended_at = models.DateTimeField(null=True, blank=True)
     # A trip the terminal started while offline: "<terminal id>:<server trip>+<n>"
     terminal_ref = models.CharField(max_length=40, blank=True, default='')
+    # Seats held for corporate card holders this trip (reserved-seat boarding;
+    # see bus-fare/BOARDING_DESIGN.md). 0 = none reserved.
+    reserved_seats = models.PositiveIntegerField(default=0)
 
     class Meta:
         constraints = [

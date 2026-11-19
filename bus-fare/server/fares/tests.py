@@ -585,3 +585,42 @@ class SafetyTests(Base):
         self.person('crew1').post('/api/operator/trip/', {'route': marimanti.pk}, format='json')
         Trip.objects.filter(vehicle=self.bus1).update(ended_at=timezone.now())
         self.assertEqual(self.tap('E5734107').json()['fare'], marimanti.fare)
+
+
+class ReservedSeatsTests(Base):
+    """Reserved-seat boarding counter on the crew live screen (BOARDING_DESIGN.md)."""
+
+    def crew(self):
+        return self.person('crew1')   # operator of KDA 001A (bus1)
+
+    def test_default_zero_and_counts_corporate_paid_taps(self):
+        crew = self.crew()
+        self.assertEqual(crew.get('/api/operator/live/').json()['seats'],
+                         {'reserved': 0, 'boarded': 0, 'left': 0})
+        self.assertEqual(crew.post('/api/operator/reserved/', {'seats': 15}, format='json').json(),
+                         {'reserved': 15, 'boarded': 0, 'left': 15})
+        self.tap('E5734107')   # a Demo Staff Ltd employee (corporate)
+        self.assertEqual(crew.get('/api/operator/live/').json()['seats'],
+                         {'reserved': 15, 'boarded': 1, 'left': 14})
+
+    def test_non_corporate_card_is_not_counted(self):
+        Passenger.objects.create(card_uid='DEADBEEF', name='Walk-in', balance=500)
+        crew = self.crew()
+        crew.post('/api/operator/reserved/', {'seats': 10}, format='json')
+        self.tap('DEADBEEF')
+        self.assertEqual(crew.get('/api/operator/live/').json()['seats']['boarded'], 0)
+
+    def test_left_never_goes_negative(self):
+        crew = self.crew()
+        self.tap('E5734107')
+        self.assertEqual(crew.get('/api/operator/live/').json()['seats'],
+                         {'reserved': 0, 'boarded': 1, 'left': 0})
+
+    def test_seats_must_be_in_range(self):
+        crew = self.crew()
+        self.assertEqual(crew.post('/api/operator/reserved/', {'seats': -1}, format='json').status_code, 400)
+        self.assertEqual(crew.post('/api/operator/reserved/', {'seats': 1000}, format='json').status_code, 400)
+
+    def test_only_the_operator_can_set_reserved_seats(self):
+        self.assertEqual(APIClient().post('/api/operator/reserved/', {'seats': 5}, format='json').status_code,
+                         403)
