@@ -31,7 +31,7 @@ from .serializers import (
 )
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
-    block_card, create_employee, deactivate_terminal, get_current_trip, process_tap, reserved_summary, reset_password,
+    block_card, create_employee, deactivate_terminal, get_current_trip, process_tap, reactivate_terminal, reserved_summary, reset_password,
     routes_for, sacco_taps, sacco_vehicle_summary, set_reserved_seats, settlements_total, start_new_trip, sync_offline, tap_totals, terminal_cards,
     terminal_status, top_up, trip_stats,
 )
@@ -392,6 +392,18 @@ class SaccoTerminalDeactivateView(SaccoView):
     def post(self, request, pk):
         vehicle = get_object_or_404(self.sacco.vehicles, pk=pk)
         deactivate_terminal(vehicle)
+        return Response(sacco_vehicle_summary(vehicle))
+
+
+class SaccoTerminalReactivateView(SaccoView):
+    """POST /api/sacco/vehicles/<id>/reactivate-terminal/ -> the vehicle, as in the fleet list.
+    Switch a terminal back on (e.g. a lost one turned up). Only its own vehicles.
+    NOTE: the original design limited reactivation to platform staff; this lets the
+    SACCO do it too, for self-contained demos. Revisit before production."""
+
+    def post(self, request, pk):
+        vehicle = get_object_or_404(self.sacco.vehicles, pk=pk)
+        reactivate_terminal(vehicle)
         return Response(sacco_vehicle_summary(vehicle))
 
 
