@@ -459,7 +459,7 @@ void lcdIdle() {
   lcdInit();  // self-heal if the display lost power for a moment
   if (terminalLocked) {
     lcdLine(0, "Terminal locked");
-    lcdLine(1, "Pay the crew");
+    lcdLine(1, "Return to SACCO");
     lcdShowingMessage = false;
     return;
   }
@@ -872,7 +872,7 @@ void handleTap(const char *uid) {
   Serial.printf("Card: %s\n", uid);
   if (terminalLocked) {
     Serial.println("REFUSED: this terminal was deactivated (reported lost or stolen)");
-    lcdMessage("Terminal locked", "Pay the crew");
+    lcdMessage("Terminal locked", "Return to SACCO");
     flash(true, false, false, SND_UNKNOWN);
     return;
   }
