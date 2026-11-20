@@ -5,11 +5,11 @@ German tap-to-pay ticketing. An employee taps a card at the door; the terminal
 in the vehicle says **PAID**, **ALREADY PAID** or **DECLINED** in about a second,
 and the fare comes off the card (or is billed to their company).
 
-**Live demo:** https://web-production-9ad597a4.up.railway.app
+**Live demo:** https://9two5.nextup.co.ke
 
 ```
  card ──tap──► ESP32 terminal ──HTTPS──► Django server ──► PostgreSQL
-               RC522 reader               │  (Railway)
+               RC522 reader               │  (KENET)  
                16×2 LCD, LED, piezo       └─► dashboards: crew, company admin, employee
                offline: decides by itself,
                syncs payments later
@@ -72,7 +72,7 @@ token over USB with `tools/set_wifi.py`.
 | [`PROGRESS.md`](bus-fare/PROGRESS.md) | What is built and tested, and what is next |
 | [`WIRING.md`](bus-fare/WIRING.md) | Parts, wiring, flashing and hardware tests (Uno and ESP32) |
 | [`DASHBOARDS.md`](bus-fare/DASHBOARDS.md) | Server data model, API, roles and dashboards |
-| [`DEPLOY.md`](bus-fare/DEPLOY.md) | Railway deployment and its environment variables |
+| [`DEPLOY.md`](bus-fare/DEPLOY.md) | Deployment (KENET now, Railway before) and its settings |
 
 ## Known limits (prototype)
 

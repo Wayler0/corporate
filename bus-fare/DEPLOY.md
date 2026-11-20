@@ -1,4 +1,32 @@
-# Deploying the fare system (Railway)
+# Deploying the fare system
+
+## KENET (production since 20 Nov 2026)
+
+The fare system now runs on the university's KENET VMs, next to NextUp, after Railway's
+trial ran out. The Railway notes further down are kept for reference.
+
+| | |
+|---|---|
+| Live address | **https://9two5.nextup.co.ke** (Cloudflare A record → 197.137.65.49, DNS only) |
+| Where | vm-app (197.137.65.49): service `busfare-web` in `/opt/nextup/compose.yml`, image `nextup-busfare`, behind the shared Caddy (Let's Encrypt, RSA) |
+| Database | vm-db (10.8.0.12 over WireGuard): PostgreSQL 18, database and user `busfare` |
+| Settings | `/opt/nextup/env/busfare.env` (copied from Railway's variables) and `BUSFARE_*` in `/opt/nextup/.env`. Never in git |
+| Backups | nightly 02:00 `pg_dump` with the other apps, `/srv/files/backups/busfare-*.dump`, kept 14 days |
+| Deploy | from a laptop with the KENET key: `bash bus-fare/deploy-kenet.sh` (ships the committed `bus-fare/` of HEAD, builds on vm-app, health check, rolls back on failure) |
+| Logs | `ssh user@197.137.65.49 'cd /opt/nextup && docker compose logs --tail 100 busfare-web'` |
+
+The demo data was seeded fresh on KENET (same logins, password and terminal tokens as on
+Railway); taps made on Railway were not copied. **Terminals:** point each ESP32 at the new
+address over the USB cable with `server https://9two5.nextup.co.ke` (saved; no reflash).
+Its tokens did not change.
+
+Not automatic yet: the NextUp repos deploy on every push to `main` through GitHub Actions
+and `/opt/nextup/deploy.sh`, which needs the `kenet` environment's secrets in the repo.
+That needs an admin of `Wayler0/corporate` to run the kit's `setup-ci.sh` for this repo.
+
+---
+
+## Railway (until 20 Nov 2026)
 
 The server and the dashboards run as **one service** on [Railway](https://railway.com),
 with a **PostgreSQL** database next to it. The ESP32 terminal talks to it over
