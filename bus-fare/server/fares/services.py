@@ -10,7 +10,8 @@ from django.db import models, transaction
 from django.utils import timezone
 
 from .models import (
-    MAX_BALANCE, Company, Passenger, Profile, Route, Settlement, TerminalMessage, Transaction, Trip,
+    MAX_BALANCE, Company, Passenger, Profile, Route, Settlement, TerminalMessage, Transaction, Trip, Vehicle,
+    new_terminal_token,
 )
 
 
@@ -373,8 +374,37 @@ TERMINAL_ONLINE_SECONDS = 8   # the Uno itself gives up on the link after 8 s wi
 
 def terminal_status(vehicle):
     last = vehicle.last_seen_at
-    online = last is not None and (timezone.now() - last).total_seconds() <= TERMINAL_ONLINE_SECONDS
-    return {'online': online, 'last_seen': last}
+    online = (vehicle.terminal_active and last is not None
+              and (timezone.now() - last).total_seconds() <= TERMINAL_ONLINE_SECONDS)
+    return {'online': online, 'last_seen': last, 'deactivated_at': vehicle.terminal_deactivated_at}
+
+
+# ---------- Lost terminals ----------
+@transaction.atomic
+def deactivate_terminal(vehicle):
+    """Lost or stolen terminal: its token is refused from now on, so nobody can take
+    fares, read the card list or send made-up offline payments with it. The terminal
+    locks itself and wipes its card list when it next reaches the server.
+    Deactivating twice keeps the first time. Returns True if it was active."""
+    updated = Vehicle.objects.filter(pk=vehicle.pk, terminal_deactivated_at__isnull=True).update(
+        terminal_deactivated_at=timezone.now())
+    vehicle.refresh_from_db(fields=['terminal_deactivated_at'])
+    return updated == 1
+
+
+@transaction.atomic
+def reactivate_terminal(vehicle, new_token=False):
+    """Let the vehicle's terminal work again (platform staff only).
+    new_token=True for a replacement terminal: the lost one's token stops working
+    for good, and the new token must be set on the new terminal. Without it, the
+    found terminal carries on and sends any payments it took offline."""
+    vehicle.terminal_deactivated_at = None
+    fields = ['terminal_deactivated_at']
+    if new_token:
+        vehicle.terminal_token = new_terminal_token()
+        fields.append('terminal_token')
+    vehicle.save(update_fields=fields)
+    return vehicle
 
 
 # ---------- Lost cards ----------

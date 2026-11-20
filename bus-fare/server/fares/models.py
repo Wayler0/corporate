@@ -84,9 +84,16 @@ class Vehicle(models.Model):
         max_length=64, unique=True, default=new_terminal_token,
         help_text="Secret the vehicle's bridge sends with every call: bridge.py --token ...")
     last_seen_at = models.DateTimeField(null=True, blank=True)   # last bridge poll
+    terminal_deactivated_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Set when the terminal is lost or stolen: every call with its token is refused')
 
     def __str__(self):
         return f'{self.registration} ({self.name})' if self.name else self.registration
+
+    @property
+    def terminal_active(self):
+        return self.terminal_deactivated_at is None
 
 
 class Passenger(models.Model):

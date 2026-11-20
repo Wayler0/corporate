@@ -36,6 +36,16 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(self.bridge.ready)
         self.assertEqual(self.port.written, ['FARE 70'])
 
+    def test_deactivated_terminal_is_named_in_the_log(self):
+        response = requests.Response()
+        response.status_code = 403
+        response._content = b'{"detail": "...", "code": "terminal_deactivated"}'
+        error = requests.HTTPError(response=response)
+        self.assertIn('DEACTIVATED', bridge.reason(error))
+        self.with_api(error)
+        self.bridge.poll_once()
+        self.assertEqual(self.port.written, [])   # no LINK: the Uno is not told it is linked
+
     def test_tap_is_answered_with_res(self):
         api = self.with_api({'result': 'PAID', 'fare': 50, 'balance': 450})
         self.bridge.on_line('TAP E5734107')

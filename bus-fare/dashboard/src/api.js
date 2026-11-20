@@ -83,6 +83,7 @@ export const api = {
   sacco: () => get('/sacco/'),
   fleet: () => get('/sacco/vehicles/'),
   setVehicleReserved: (id, seats) => post(`/sacco/vehicles/${id}/reserved/`, { seats }),
+  deactivateTerminal: (id) => post(`/sacco/vehicles/${id}/deactivate-terminal/`),
 
   // company admin
   company: () => get('/company/'),

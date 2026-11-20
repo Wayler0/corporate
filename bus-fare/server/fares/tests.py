@@ -10,7 +10,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from .models import Company, Passenger, Route, Sacco, Settlement, Transaction, Trip, Vehicle
-from .services import change_fare, get_current_trip, normalize_phone, vehicle_moved_sacco
+from .services import (
+    change_fare, deactivate_terminal, get_current_trip, normalize_phone, reactivate_terminal,
+    vehicle_moved_sacco,
+)
 
 PASSWORD = 'demo-pass-2026'
 BUS1 = 'demo-terminal-bus-1'
@@ -762,3 +765,106 @@ class SaccoDashboardTests(Base):
 
     def test_me_names_the_sacco(self):
         self.assertEqual(self.admin.get('/api/auth/me/').json()['user']['sacco']['name'], 'Demo Sacco')
+
+
+class LostTerminalTests(Base):
+    """A lost or stolen terminal is deactivated: its token stops working everywhere."""
+
+    def deactivated(self, response):
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertEqual(response.json()['code'], 'terminal_deactivated')
+
+    def test_deactivated_terminal_is_refused_on_every_terminal_call(self):
+        deactivate_terminal(self.bus1)
+        client = self.terminal(BUS1)
+        self.deactivated(client.post('/api/tap/', {'card_uid': 'E5734107'}, format='json'))
+        self.deactivated(client.get('/api/status/'))
+        self.deactivated(client.post('/api/terminal/poll/'))
+        self.deactivated(client.get('/api/terminal/cards/'))   # the card list must not leak
+        self.deactivated(client.post('/api/terminal/sync/', {
+            'terminal': 'AAAA0001', 'trip': 0, 'trips_started': 0,
+            'taps': [{'ref': 1, 'card_uid': 'E5734107', 'fare': 50, 'trip': 0, 'offset': 0, 'seconds_ago': 5}]},
+            format='json'))
+        self.assertEqual(Passenger.objects.get(card_uid='E5734107').balance, 500)   # nothing charged
+
+    def test_other_vehicles_keep_working(self):
+        deactivate_terminal(self.bus1)
+        self.assertEqual(self.tap('E5734107', BUS2).json()['result'], 'PAID')
+
+    def test_deactivating_twice_keeps_the_first_time(self):
+        self.assertTrue(deactivate_terminal(self.bus1))
+        first = self.bus1.terminal_deactivated_at
+        self.assertFalse(deactivate_terminal(self.bus1))
+        self.assertEqual(Vehicle.objects.get(pk=self.bus1.pk).terminal_deactivated_at, first)
+
+    def test_found_terminal_works_again_with_its_old_token(self):
+        deactivate_terminal(self.bus1)
+        reactivate_terminal(self.bus1)
+        self.assertEqual(self.tap('E5734107').json()['result'], 'PAID')
+
+    def test_replacement_gets_a_new_token_and_the_old_one_never_works(self):
+        deactivate_terminal(self.bus1)
+        reactivate_terminal(self.bus1, new_token=True)
+        self.assertNotEqual(self.bus1.terminal_token, BUS1)
+        self.assertEqual(self.tap('E5734107').status_code, 401)
+        self.assertEqual(self.tap('E5734107', self.bus1.terminal_token).json()['result'], 'PAID')
+
+    # ----- SACCO admin -----
+    def test_sacco_admin_deactivates_own_vehicles_terminal(self):
+        response = self.person('saccoadmin').post(f'/api/sacco/vehicles/{self.bus1.pk}/deactivate-terminal/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()['terminal']['deactivated_at'])
+        self.assertFalse(response.json()['terminal']['online'])
+        self.deactivated(self.tap('E5734107'))
+
+    def test_fleet_shows_deactivated_terminal(self):
+        deactivate_terminal(self.bus1)
+        fleet = self.person('saccoadmin').get('/api/sacco/vehicles/').json()
+        bus1 = next(v for v in fleet if v['registration'] == 'KDA 001A')
+        self.assertIsNotNone(bus1['terminal']['deactivated_at'])
+
+    def test_sacco_admin_cannot_deactivate_another_saccos_vehicle(self):
+        other = Sacco.objects.create(name='Other Sacco')
+        Route.objects.create(sacco=other, name='Marimanti-Chuka', fare=120)
+        self.bus2.sacco = other
+        self.bus2.save()
+        response = self.person('saccoadmin').post(f'/api/sacco/vehicles/{self.bus2.pk}/deactivate-terminal/')
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Vehicle.objects.get(pk=self.bus2.pk).terminal_active)
+
+    def test_only_a_sacco_admin_may_deactivate_from_the_dashboard(self):
+        for username in ('crew1', 'staffadmin', '0700000001'):
+            response = self.person(username).post(f'/api/sacco/vehicles/{self.bus1.pk}/deactivate-terminal/')
+            self.assertEqual(response.status_code, 403, username)
+        self.assertTrue(Vehicle.objects.get(pk=self.bus1.pk).terminal_active)
+
+    # ----- platform staff (Django admin) -----
+    def admin_action(self, action):
+        staff = get_user_model().objects.create_superuser('platform', 'p@example.com', PASSWORD)
+        self.client.force_login(staff)
+        return self.client.post('/admin/fares/vehicle/', {
+            'action': action, '_selected_action': [self.bus1.pk]}, follow=True)
+
+    def test_admin_action_deactivates(self):
+        self.assertEqual(self.admin_action('deactivate_terminals').status_code, 200)
+        self.deactivated(self.tap('E5734107'))
+
+    def test_admin_action_reactivates(self):
+        deactivate_terminal(self.bus1)
+        self.admin_action('reactivate_terminals')
+        self.assertEqual(self.tap('E5734107').json()['result'], 'PAID')
+
+    def test_admin_action_issues_a_new_token(self):
+        deactivate_terminal(self.bus1)
+        response = self.admin_action('issue_new_tokens')
+        token = Vehicle.objects.get(pk=self.bus1.pk).terminal_token
+        self.assertContains(response, token)   # shown once, to set on the new terminal
+        self.assertEqual(self.tap('E5734107').status_code, 401)
+        self.assertEqual(self.tap('E5734107', token).json()['result'], 'PAID')
+
+    def test_admin_list_shows_the_terminal_state(self):
+        deactivate_terminal(self.bus1)
+        staff = get_user_model().objects.create_superuser('platform', 'p@example.com', PASSWORD)
+        self.client.force_login(staff)
+        self.assertContains(self.client.get('/admin/fares/vehicle/?terminal=deactivated'), 'KDA 001A')
+        self.assertNotContains(self.client.get('/admin/fares/vehicle/?terminal=deactivated'), 'KDB 002B')

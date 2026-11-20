@@ -31,7 +31,7 @@ from .serializers import (
 )
 from .services import (
     AmountError, NoRouteError, NotAllowedError, collect_terminal_lines, company_outstanding,
-    block_card, create_employee, get_current_trip, process_tap, reserved_summary, reset_password,
+    block_card, create_employee, deactivate_terminal, get_current_trip, process_tap, reserved_summary, reset_password,
     routes_for, sacco_taps, sacco_vehicle_summary, set_reserved_seats, settlements_total, start_new_trip, sync_offline, tap_totals, terminal_cards,
     terminal_status, top_up, trip_stats,
 )
@@ -382,6 +382,17 @@ class SaccoReservedView(SaccoView):
         except AmountError as error:
             return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(reserved_summary(trip))
+
+
+class SaccoTerminalDeactivateView(SaccoView):
+    """POST /api/sacco/vehicles/<id>/deactivate-terminal/ -> the vehicle, as in the fleet list.
+    Lost or stolen terminal: refused by the server from now on. Only its own vehicles.
+    Only platform staff can reactivate it or issue a token for a replacement."""
+
+    def post(self, request, pk):
+        vehicle = get_object_or_404(self.sacco.vehicles, pk=pk)
+        deactivate_terminal(vehicle)
+        return Response(sacco_vehicle_summary(vehicle))
 
 
 # =====================================================================
