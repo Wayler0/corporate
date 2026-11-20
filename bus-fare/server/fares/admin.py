@@ -5,14 +5,17 @@ agreed fares, their vehicles (and the crew's logins), companies (and their admin
 login), and records company settlements.
 Companies then register their own employees from the dashboard.
 """
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 from .models import (
     Company, Passenger, Profile, Route, Sacco, Settlement, TerminalMessage, Transaction, Trip, Vehicle,
 )
-from .services import change_fare, company_outstanding, vehicle_moved_sacco
+from .services import (
+    change_fare, company_outstanding, deactivate_terminal, reactivate_terminal, vehicle_moved_sacco,
+)
 
 
 class ProfileInline(admin.StackedInline):
@@ -68,12 +71,60 @@ class SaccoAdmin(admin.ModelAdmin):
         return sacco.routes.count()
 
 
+class TerminalStateFilter(admin.SimpleListFilter):
+    title = 'terminal'
+    parameter_name = 'terminal'
+
+    def lookups(self, request, model_admin):
+        return [('active', 'Active'), ('deactivated', 'Deactivated (lost or stolen)')]
+
+    def queryset(self, request, queryset):
+        if self.value() == 'active':
+            return queryset.filter(terminal_deactivated_at__isnull=True)
+        if self.value() == 'deactivated':
+            return queryset.filter(terminal_deactivated_at__isnull=False)
+        return queryset
+
+
 @admin.register(Vehicle)
 class VehicleAdmin(admin.ModelAdmin):
-    list_display = ('registration', 'name', 'sacco', 'last_seen_at')
-    list_filter = ('sacco',)
-    readonly_fields = ('last_seen_at',)
-    fields = ('registration', 'name', 'sacco', 'terminal_token', 'last_seen_at')
+    """A lost or stolen terminal: tick the vehicle, then pick an action:
+      * Deactivate terminal: its token is refused at once; the terminal locks itself.
+      * Reactivate terminal: it was found; it works again and sends its offline payments.
+      * Issue a new token: for a replacement terminal; the lost one never works again.
+    A SACCO admin can also deactivate their own vehicles' terminals on the Fleet screen."""
+    list_display = ('registration', 'name', 'sacco', 'terminal_state', 'last_seen_at')
+    list_filter = ('sacco', TerminalStateFilter)
+    readonly_fields = ('last_seen_at', 'terminal_deactivated_at')
+    fields = ('registration', 'name', 'sacco', 'terminal_token', 'last_seen_at', 'terminal_deactivated_at')
+    actions = ['deactivate_terminals', 'reactivate_terminals', 'issue_new_tokens']
+
+    @admin.display(description='Terminal')
+    def terminal_state(self, vehicle):
+        if vehicle.terminal_active:
+            return 'Active'
+        return f'DEACTIVATED {timezone.localtime(vehicle.terminal_deactivated_at):%Y-%m-%d %H:%M}'
+
+    @admin.action(description='Deactivate terminal (lost or stolen)')
+    def deactivate_terminals(self, request, queryset):
+        done = [v.registration for v in queryset if deactivate_terminal(v)]
+        self.message_user(request, f'Deactivated: {", ".join(done)}.' if done else 'Already deactivated.',
+                          messages.WARNING if done else messages.INFO)
+
+    @admin.action(description='Reactivate terminal (it was found)')
+    def reactivate_terminals(self, request, queryset):
+        for vehicle in queryset:
+            reactivate_terminal(vehicle)
+        self.message_user(request, f'Reactivated: {", ".join(v.registration for v in queryset)}.')
+
+    @admin.action(description='Issue a new token (replacement terminal) and reactivate')
+    def issue_new_tokens(self, request, queryset):
+        for vehicle in queryset:
+            reactivate_terminal(vehicle, new_token=True)
+            self.message_user(
+                request, f'{vehicle.registration}: new token {vehicle.terminal_token} '
+                         '(set it on the new terminal: "token <token>", or bridge.py --token). '
+                         'The old token no longer works.', messages.WARNING)
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)

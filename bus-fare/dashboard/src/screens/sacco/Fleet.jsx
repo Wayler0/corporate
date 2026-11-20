@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api } from '../../api.js'
 import { usePoll } from '../../usePoll.js'
-import { clock, money } from '../../format.js'
+import { clock, money, shortDate } from '../../format.js'
 import { Message, PageState, ServerProblem } from '../../components/ui.jsx'
 
 const SEAT_CHOICES = [0, 3, 5, 10, 15]
@@ -30,6 +30,25 @@ export default function Fleet() {
     }
   }
 
+  // Lost or stolen terminal: refused by the server at once. Only the transport
+  // office can switch it back on or set up a replacement.
+  async function deactivate(vehicle) {
+    if (busy) return
+    if (!window.confirm(`Deactivate the terminal on ${vehicle.registration}? It stops taking fares straight away `
+      + 'and wipes its card list when it next reaches the server. Only the transport office can switch it back on.')) return
+    setBusy(vehicle.id)
+    setMessage(null)
+    try {
+      await api.deactivateTerminal(vehicle.id)
+      setMessage({ tone: 'ok', text: `${vehicle.registration}: terminal deactivated. Call the transport office for a replacement.` })
+      poll.refresh()
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const fleet = poll.data
   return (
     <>
@@ -48,9 +67,9 @@ export default function Fleet() {
                   {v.trip ? `${v.trip.route_name} · ${money(v.trip.fare)} · trip ${v.trip.trip} since ${clock(v.trip.started_at)}` : 'No trip running'}
                 </span>
               </div>
-              <span className={`pill ${v.terminal.online ? 'pill-on' : 'pill-off'}`}>
+              <span className={`pill ${v.terminal.deactivated_at ? 'pill-dead' : v.terminal.online ? 'pill-on' : 'pill-off'}`}>
                 <span className="dot" />
-                {v.terminal.online ? 'Online' : 'Offline'}
+                {v.terminal.deactivated_at ? 'Deactivated' : v.terminal.online ? 'Online' : 'Offline'}
               </span>
             </div>
 
@@ -76,8 +95,18 @@ export default function Fleet() {
                 </div>
               </>
             )}
-            {!v.terminal.online && v.terminal.last_seen && (
+            {!v.terminal.deactivated_at && !v.terminal.online && v.terminal.last_seen && (
               <p className="muted small">Terminal last seen {clock(v.terminal.last_seen)}. It keeps charging cards offline and sends them later.</p>
+            )}
+            {v.terminal.deactivated_at ? (
+              <p className="small fg-refused">
+                Terminal deactivated {shortDate(v.terminal.deactivated_at)} {clock(v.terminal.deactivated_at)}. It takes no fares.
+                The transport office switches it back on or sets up a replacement.
+              </p>
+            ) : (
+              <button type="button" className="btn danger" disabled={busy !== null} onClick={() => deactivate(v)}>
+                {busy === v.id ? 'Deactivating…' : 'Terminal lost or stolen? Deactivate it'}
+              </button>
             )}
           </section>
         ))}

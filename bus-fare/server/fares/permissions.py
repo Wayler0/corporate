@@ -2,12 +2,24 @@
 
 * A vehicle's bridge sends   Authorization: Terminal <token>   (the vehicle's
   terminal_token). That identifies the vehicle; no person is logged in.
+  A deactivated terminal (lost or stolen) is refused with 403 and
+  {"code": "terminal_deactivated"}, so the terminal knows to lock itself.
 * People log in through /api/auth/login/ and are known by their Profile role.
 """
 from django.contrib.auth.models import AnonymousUser
-from rest_framework import authentication, exceptions, permissions
+from rest_framework import authentication, exceptions, permissions, status
 
 from .models import Profile, Vehicle
+
+
+class TerminalDeactivated(exceptions.APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+    default_code = 'terminal_deactivated'
+
+    def __init__(self):
+        # A dict, so the code reaches the terminal in the body, not only the message
+        super().__init__({'detail': 'This terminal has been deactivated. Contact the transport office.',
+                          'code': self.default_code})
 
 
 class TerminalAuthentication(authentication.BaseAuthentication):
@@ -22,6 +34,8 @@ class TerminalAuthentication(authentication.BaseAuthentication):
         vehicle = Vehicle.objects.filter(terminal_token=header[1]).first()
         if vehicle is None:
             raise exceptions.AuthenticationFailed('Unknown terminal token.')
+        if not vehicle.terminal_active:
+            raise TerminalDeactivated()
         return AnonymousUser(), vehicle
 
     def authenticate_header(self, request):

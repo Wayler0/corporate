@@ -79,6 +79,7 @@ a { color: var(--accent); }
 .pill-off { background: #2B2F35; color: #C9CED4; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .pill-on .dot { background: #3DDC84; }
+.pill-dead { background: #3A2422; color: #F2B8B2; }
 
 .icon-btn {
   width: 48px; height: 48px; display: inline-flex; align-items: center; justify-content: center;

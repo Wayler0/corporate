@@ -43,6 +43,8 @@ def reason(error):
     if isinstance(error, requests.Timeout):
         return 'server too slow'
     response = getattr(error, 'response', None)
+    if response is not None and response.status_code == 403 and 'terminal_deactivated' in response.text:
+        return 'this terminal was DEACTIVATED on the server (reported lost or stolen)'
     if response is not None and response.status_code in (401, 403):
         return 'server refused the terminal token (check --token)'
     return str(error)

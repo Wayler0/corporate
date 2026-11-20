@@ -14,6 +14,9 @@
 //     with POST /api/terminal/sync/ as soon as the server answers again, before
 //     anything else. Trips started offline ("trip", "route <n>") are sent too.
 //   * A '*' in the top right corner of the LCD means "connected to the server".
+//   * Lost or stolen: once the server says this terminal was deactivated, it wipes
+//     its card list, refuses every tap and shows "Terminal locked" (even after a
+//     restart) until the server accepts it again.
 //   * Wi-Fi, server address and token can be changed over the USB cable without
 //     uploading:  python3 tools/set_wifi.py "<network>" "<password>"
 //     (or type  wifi <name>|<password>  in the Serial Monitor). They are saved.
@@ -188,6 +191,7 @@ String serverRouteName;           // empty = use the route's own name
 bool wifiWasUp = false;
 unsigned long lastCardsAt = 0;
 bool cardsDue = true;             // refresh the card list at the next chance
+bool terminalLocked = false;      // the server deactivated this terminal (lost or stolen); saved
 
 Card cards[MAX_CARDS];
 uint16_t cardCount = 0;
@@ -424,7 +428,8 @@ void loadState() {
   if (currentRoute >= ROUTE_COUNT) currentRoute = 0;
   serverFare = store.getUShort("sfare", 0);
   serverRouteName = store.getString("sroute", "");
-  if (!loadCards()) {
+  terminalLocked = store.getBool("locked", false);
+  if (!loadCards() && !terminalLocked) {
     Serial.println("No card list yet: using the demo cards until the server is reached.");
     loadDemoCards();
   }
@@ -452,6 +457,12 @@ String routeName() { return serverRouteName.length() ? serverRouteName : String(
 
 void lcdIdle() {
   lcdInit();  // self-heal if the display lost power for a moment
+  if (terminalLocked) {
+    lcdLine(0, "Terminal locked");
+    lcdLine(1, "Pay the crew");
+    lcdShowingMessage = false;
+    return;
+  }
   // '*' in the corner = connected to the server; a long route name scrolls beside it
   lcdLineMark(0, routeName(), serverOnline ? '*' : 0);
   lcdLine(1, readerOk ? String("KSh ") + currentFare() + "  Tap card" : String("Check reader!"));
@@ -504,6 +515,30 @@ long jsonNumber(const String &json, const char *key, long fallback) {
   return json.substring(c).toInt();
 }
 
+// ---------- Lost or stolen terminal ----------
+// The server refuses this terminal's token with "terminal_deactivated": stop taking
+// fares and forget every card, so a stolen terminal keeps no copy of them. Payments
+// already taken offline stay queued: if it was a mistake and the terminal is switched
+// back on, they are still sent. It keeps asking the server, so switching it back on
+// (or setting a replacement token with "token <token>") unlocks it.
+void lockTerminal() {
+  if (terminalLocked) return;
+  terminalLocked = true;
+  store.putBool("locked", true);
+  cardCount = 0;
+  saveCards();
+  Serial.println("TERMINAL DEACTIVATED by the server (reported lost or stolen): card list wiped, taps refused.");
+  lcdIdle();
+}
+void unlockTerminal() {
+  if (!terminalLocked) return;
+  terminalLocked = false;
+  store.putBool("locked", false);
+  cardsDue = true;   // download the card list again
+  Serial.println("Terminal switched back on by the server.");
+  lcdMessage("Terminal active", "again");
+}
+
 // ---------- Talking to the server ----------
 // One connection to the server, kept open and reused by every tap and poll. Over
 // https a new connection costs an encrypted handshake (seconds from Kenya to the
@@ -530,7 +565,9 @@ int serverRequest(const char *method, const char *path, const String &payload, S
     tlsClient.stop();
     plainClient.stop();
   }
-  if (code == 401 || code == 403) Serial.println("Server refused the terminal token: set it with:  token <token>");
+  if (code == 403 && body.indexOf("terminal_deactivated") >= 0) lockTerminal();
+  else if (code == 401 || code == 403) Serial.println("Server refused the terminal token: set it with:  token <token>");
+  else if (code >= 200 && code < 300) unlockTerminal();
   return code;
 }
 
@@ -833,6 +870,12 @@ void offlineTap(const char *uid) {
 void handleTap(const char *uid) {
   Serial.println("----------------------------------------");
   Serial.printf("Card: %s\n", uid);
+  if (terminalLocked) {
+    Serial.println("REFUSED: this terminal was deactivated (reported lost or stolen)");
+    lcdMessage("Terminal locked", "Pay the crew");
+    flash(true, false, false, SND_UNKNOWN);
+    return;
+  }
   if (serverOnline && serverTap(uid)) return;
   offlineTap(uid);
 }
@@ -854,6 +897,7 @@ void printStatus() {
   Serial.printf("Wi-Fi: %s", WiFi.status() == WL_CONNECTED ? "connected" : "NOT connected");
   if (WiFi.status() == WL_CONNECTED) Serial.printf(" (%s, IP %s, %d dBm)", cfgSsid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
   Serial.printf("\nServer: %s  %s\n", cfgUrl.c_str(), serverOnline ? "ONLINE" : "offline");
+  if (terminalLocked) Serial.println("TERMINAL DEACTIVATED by the server: taps are refused until it is switched back on");
   Serial.printf("Route: %s  |  Fare: KSh %u\n", routeName().c_str(), currentFare());
   Serial.printf("Trip: server %u + %u started here  |  Cards: %u  |  Waiting to send: %u  |  Terminal %s\n",
                 serverTrip, tripOffset, cardCount, queuedCount(), terminalId);
