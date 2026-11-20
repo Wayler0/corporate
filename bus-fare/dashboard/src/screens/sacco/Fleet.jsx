@@ -49,6 +49,21 @@ export default function Fleet() {
     }
   }
 
+  async function reactivate(vehicle) {
+    if (busy) return
+    setBusy(vehicle.id)
+    setMessage(null)
+    try {
+      await api.reactivateTerminal(vehicle.id)
+      setMessage({ tone: 'ok', text: `${vehicle.registration}: terminal switched back on.` })
+      poll.refresh()
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const fleet = poll.data
   return (
     <>
@@ -99,10 +114,14 @@ export default function Fleet() {
               <p className="muted small">Terminal last seen {clock(v.terminal.last_seen)}. It keeps charging cards offline and sends them later.</p>
             )}
             {v.terminal.deactivated_at ? (
-              <p className="small fg-refused">
-                Terminal deactivated {shortDate(v.terminal.deactivated_at)} {clock(v.terminal.deactivated_at)}. It takes no fares.
-                The transport office switches it back on or sets up a replacement.
-              </p>
+              <>
+                <p className="small fg-refused">
+                  Terminal deactivated {shortDate(v.terminal.deactivated_at)} {clock(v.terminal.deactivated_at)}. It takes no fares.
+                </p>
+                <button type="button" className="btn" disabled={busy !== null} onClick={() => reactivate(v)}>
+                  {busy === v.id ? 'Switching on…' : 'Found it? Switch the terminal back on'}
+                </button>
+              </>
             ) : (
               <button type="button" className="btn danger" disabled={busy !== null} onClick={() => deactivate(v)}>
                 {busy === v.id ? 'Deactivating…' : 'Terminal lost or stolen? Deactivate it'}

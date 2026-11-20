@@ -177,6 +177,19 @@ def change_fare(route, fare):
     return route
 
 
+@transaction.atomic
+def create_route(sacco, name, fare):
+    """Add a route for a SACCO, with the agreed fare. Names are unique per SACCO."""
+    name = name.strip()
+    if not name:
+        raise NotAllowedError('Give the route a name.')
+    if fare < 1 or fare > MAX_BALANCE:
+        raise AmountError(f'Fare must be 1 to {MAX_BALANCE}.')
+    if Route.objects.filter(sacco=sacco, name=name).exists():
+        raise NotAllowedError(f'{sacco.name} already runs a route called "{name}".')
+    return Route.objects.create(sacco=sacco, name=name, fare=fare)
+
+
 # ---------- Taps ----------
 def company_outstanding(company):
     """What a company-pays company still owes: fares charged minus settlements."""

@@ -1,0 +1,46 @@
+name: CI
+
+# Runs the server tests and builds the dashboard on every push and pull request.
+on:
+  push:
+    branches: [main, wayler]
+  pull_request:
+
+jobs:
+  server:
+    name: Server tests (Django)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bus-fare/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: bus-fare/server/requirements.txt
+      - name: Install libpq (for psycopg)
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: python manage.py test fares
+
+  dashboard:
+    name: Dashboard build (Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bus-fare/dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bus-fare/dashboard/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build

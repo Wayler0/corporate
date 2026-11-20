@@ -99,6 +99,15 @@ class RouteSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'fare', 'sacco']
 
 
+class RouteCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=40)
+    fare = serializers.IntegerField(min_value=1, max_value=MAX_BALANCE)
+
+
+class RouteFareSerializer(serializers.Serializer):
+    fare = serializers.IntegerField(min_value=1, max_value=MAX_BALANCE)
+
+
 class OperatorTapSerializer(serializers.ModelSerializer):
     """What the bus crew sees for one tap: who and how much. No card ID, no balance."""
     name = serializers.CharField(source='passenger.name', default=None)

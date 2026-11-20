@@ -1,7 +1,73 @@
+import { useState } from 'react'
 import { api } from '../../api.js'
 import { usePoll } from '../../usePoll.js'
 import { money } from '../../format.js'
 import { PageState, ServerProblem } from '../../components/ui.jsx'
+
+// One route row with an editable agreed fare.
+function RouteRow({ route, month, onChange }) {
+  const [fare, setFare] = useState(String(route.fare))
+  const [busy, setBusy] = useState(false)
+  const changed = fare !== String(route.fare) && Number.isInteger(Number(fare)) && Number(fare) >= 1
+  async function save() {
+    if (!changed || busy) return
+    setBusy(true)
+    try { await api.setRouteFare(route.id, Number(fare)); onChange() } catch { setFare(String(route.fare)) } finally { setBusy(false) }
+  }
+  return (
+    <li className="item">
+      <div className="grow">
+        <span className="name">{route.name}</span>
+        <span className="muted small">{month}: {route.month.paid} trips · {money(route.month.collected)}</span>
+      </div>
+      <input type="number" min="1" inputMode="numeric" value={fare} onChange={(e) => setFare(e.target.value)}
+        aria-label={`Fare for ${route.name} in KSh`} style={{ width: 84, textAlign: 'right' }} />
+      <button type="button" className="btn" disabled={!changed || busy} onClick={save} style={{ padding: '6px 12px' }}>
+        {busy ? '…' : 'Save'}
+      </button>
+    </li>
+  )
+}
+
+// A SACCO sets its own routes and the agreed fare.
+function Routes({ routes, month, onChange }) {
+  const [name, setName] = useState('')
+  const [fare, setFare] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const valid = name.trim() && Number.isInteger(Number(fare)) && Number(fare) >= 1
+  async function add(event) {
+    event.preventDefault()
+    if (!valid || busy) return
+    setBusy(true); setError(null)
+    try { await api.addRoute(name.trim(), Number(fare)); setName(''); setFare(''); onChange() }
+    catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+  return (
+    <section className="stack">
+      <h2>Routes and agreed fares</h2>
+      {routes.length === 0 ? (
+        <p className="card empty">No routes yet. Add your first one below.</p>
+      ) : (
+        <ul className="card list">
+          {routes.map((r) => <RouteRow key={r.id} route={r} month={month} onChange={onChange} />)}
+        </ul>
+      )}
+      <form className="card pad stack" onSubmit={add} aria-labelledby="addroute-h">
+        <h3 id="addroute-h">Add a route</h3>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input type="text" maxLength={40} placeholder="Route name, e.g. CBD-Thika" value={name}
+            onChange={(e) => setName(e.target.value)} aria-label="Route name" style={{ flex: 1, minWidth: 150 }} />
+          <input type="number" min="1" inputMode="numeric" placeholder="Fare" value={fare}
+            onChange={(e) => setFare(e.target.value)} aria-label="Fare in KSh" style={{ width: 96 }} />
+          <button type="submit" className="btn primary" disabled={!valid || busy}>{busy ? 'Adding…' : 'Add route'}</button>
+        </div>
+        {error && <p className="small fg-refused">{error}</p>}
+      </form>
+      <p className="muted small note">You set your routes and the agreed fare. Every bus on a route is told its fare at once.</p>
+    </section>
+  )
+}
 
 // A SACCO admin's home: money and riders on their vehicles, their routes at the
 // agreed fares, and which corporate clients ride with them.
@@ -45,25 +111,7 @@ export default function SaccoOverview() {
           <span className="amount">{data.fleet.vehicles}</span>
         </a>
 
-        <section className="stack">
-          <h2>Routes and agreed fares</h2>
-          {data.routes.length === 0 ? (
-            <p className="card empty">No routes yet. The transport office adds them from your agreement.</p>
-          ) : (
-            <ul className="card list">
-              {data.routes.map((r) => (
-                <li key={r.id} className="item">
-                  <div className="grow">
-                    <span className="name">{r.name}</span>
-                    <span className="muted small">{month}: {r.month.paid} trips · {money(r.month.collected)}</span>
-                  </div>
-                  <span className="amount num">{money(r.fare)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="muted small note">Fares are fixed in your agreement, at every hour. To change one, contact the transport office.</p>
-        </section>
+        <Routes routes={data.routes} month={month} onChange={poll.refresh} />
 
         <section className="stack">
           <h2>Corporate clients, {month}</h2>

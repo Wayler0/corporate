@@ -715,6 +715,28 @@ class SaccoDashboardTests(Base):
         vehicle_moved_sacco(self.bus2)
         self.admin = self.person('saccoadmin')
 
+    def test_sacco_adds_a_route(self):
+        r = self.admin.post('/api/sacco/routes/', {'name': 'CBD-Thika', 'fare': 150}, format='json')
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(r.json()['name'], 'CBD-Thika')
+        self.assertIn('CBD-Thika', [x['name'] for x in self.admin.get('/api/sacco/').json()['routes']])
+
+    def test_sacco_changes_a_route_fare(self):
+        rid = self.admin.post('/api/sacco/routes/', {'name': 'CBD-Juja', 'fare': 100}, format='json').json()['id']
+        r = self.admin.patch(f'/api/sacco/routes/{rid}/', {'fare': 130}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(Route.objects.get(pk=rid).fare, 130)
+
+    def test_sacco_cannot_touch_another_saccos_route(self):
+        other_route = Route.objects.get(sacco=self.other)
+        r = self.admin.patch(f'/api/sacco/routes/{other_route.pk}/', {'fare': 999}, format='json')
+        self.assertEqual(r.status_code, 404)
+
+    def test_duplicate_route_name_is_rejected(self):
+        self.admin.post('/api/sacco/routes/', {'name': 'CBD-Ruiru', 'fare': 90}, format='json')
+        r = self.admin.post('/api/sacco/routes/', {'name': 'CBD-Ruiru', 'fare': 95}, format='json')
+        self.assertEqual(r.status_code, 400)
+
     def test_overview_counts_only_this_saccos_taps(self):
         self.tap('E5734107', BUS1)              # Demo Sacco, KSh 50
         self.tap('008DEC53', BUS1)              # Demo Sacco, KSh 50
