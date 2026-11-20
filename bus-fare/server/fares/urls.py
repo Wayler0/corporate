@@ -33,6 +33,8 @@ urlpatterns = [
          name='sacco-deactivate-terminal'),
     path('sacco/vehicles/<int:pk>/reactivate-terminal/', views.SaccoTerminalReactivateView.as_view(),
          name='sacco-reactivate-terminal'),
+    path('sacco/routes/', views.SaccoRoutesView.as_view(), name='sacco-routes'),
+    path('sacco/routes/<int:pk>/', views.SaccoRouteDetailView.as_view(), name='sacco-route'),
 
     # Company admin: their own company
     path('company/', views.CompanyOverviewView.as_view(), name='company'),
